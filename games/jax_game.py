@@ -11,6 +11,40 @@ class JaxGame(ABC):
     init_state, legals = self.initialize_structures(key)
     return self.get_info(init_state)
   
+  # Do not use this method if you plan to use any other tensor
+  def state_tensor(self, game_state):
+    return self.get_info(game_state)[0]
+  
+  
+  # Do not use this method if you plan to use any other tensor
+  def information_state_tensor(self, game_state, player: int):
+    if player == 0:
+      return self.get_info(game_state)[1]
+    else:
+      return self.get_info(game_state)[2]
+  
+  
+  # Do not use this method if you plan to use any other tensor
+  def public_state_tensor(self, game_state):
+    return self.get_info(game_state)[3]
+  
+  
+  @abstractmethod
+  def state_tensor_shape(self):
+    pass
+  
+  @abstractmethod
+  def observation_tensor_shape(self):
+    pass
+  
+  @abstractmethod
+  def information_state_tensor_shape(self):
+    pass
+    
+  @abstractmethod
+  def public_state_tensor_shape(self):
+    pass
+  
   @abstractmethod
   def num_distinct_actions(self):
     pass
