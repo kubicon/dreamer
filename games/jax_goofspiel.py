@@ -23,6 +23,17 @@ class JaxGoofspiel(JaxGame):
     self.reward_type = 0 if reward_type == "clip" else 1
     
   
+  def game_name(self):
+    return "goofspiel"
+  
+  def params_dict(self):
+    #Possible to also add other relevant information
+    # for now just the cards will do to organize into subdirs
+    return {self.cards}
+  
+  def num_players(self):
+    return 2
+
   def state_tensor_shape(self):
     return self.max_turns * self.cards + self.max_turns * 2 + self.max_turns * self.cards * 3
    

@@ -25,6 +25,20 @@ class FrozenLake(JaxGame):
     
     self.init_player_pos = jnp.array(init_position) + 1 # Move to padding
 
+  def game_name(self):
+    return "frozen_lake"
+  
+  def params_dict(self):
+    #This method is used just for organizing 
+    # trained networks into subdirectories for now. The full board contents would
+    # be too long, so just the size
+    board_dims_str = f"{self.init_board.shape[0]}X{self.init_board.shape[1]}"
+    return {"board_dims": board_dims_str, "init_pos" : self.init_player_pos, "max_timesteps": self.max_timesteps, "eps" : self.eps}
+
+  def num_players(self):
+    return 1
+  
+  
   def state_tensor_shape(self):
     # board (H*W) + player_pos + timestep  + gold_collected  + terminal 
     return self.height * self.width * 4 + self.height + self.width + self.max_timesteps + self.max_gold + 2
@@ -66,7 +80,7 @@ class FrozenLake(JaxGame):
     player_x = jax.nn.one_hot(game_state.player_pos[1], self.width) 
     timestep = jax.nn.one_hot(game_state.timestep, self.max_timesteps)
     gold_collected = jax.nn.one_hot(game_state.gold_collected, self.max_gold)
-    terminal = jax.nn.one_hot(game_state.terminal, 2)
+    terminal = jax.nn.one_hot(game_state.terminal.astype(jnp.int32), 2)
     state_tensor = jnp.concatenate([
         jnp.ravel(game_state.board),
         player_y,
@@ -92,7 +106,7 @@ class FrozenLake(JaxGame):
     action = actions
     
     # With probability eps, choose random action instead
-    key, roll_key, action_key = jax.random.split(key, 3)
+    roll_key, action_key = jax.random.split(key, 2)
     random_roll = jax.random.uniform(roll_key)
     should_randomize = random_roll < self.eps
      
@@ -142,4 +156,4 @@ class FrozenLake(JaxGame):
     # Legal actions - all actions are always legal (clipping handles boundaries)
     legal_actions = jnp.ones(4)
     
-    return new_game_state, key, terminal, reward, legal_actions 
+    return new_game_state, terminal, reward, legal_actions 

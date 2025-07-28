@@ -28,7 +28,28 @@ class JaxGame(ABC):
   def public_state_tensor(self, game_state):
     return self.get_info(game_state)[3]
   
+  def __str__(self):
+    params_dict = self.params_dict()
+    empty = ""
+    params_str = f'{empty.join(f"Param: {key} value: {value}" for key, value in params_dict.items())}' 
+    return str(self.game_name() + " " + params_str)
   
+  def __repr__(self):
+    return self.__str__()
+
+
+  @abstractmethod
+  def game_name(self) ->str:
+    pass
+  
+  @abstractmethod
+  def params_dict(self)->dict:
+    pass
+
+  @abstractmethod
+  def num_players(self)->int:
+    pass
+
   @abstractmethod
   def state_tensor_shape(self):
     pass
