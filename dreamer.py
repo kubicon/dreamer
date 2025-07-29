@@ -8,7 +8,7 @@ from functools import partial
 
 
 from train_utils import DreamerConfig, get_reference_policy, TimeStep
-from networks import create_networks_and_optimizers
+from networks import create_networks_and_optimizers, DreamerModel
 from games.jax_game import JaxGame, GameState
 
   
@@ -32,7 +32,6 @@ class Dreamer():
   def init(self, save_each, print_each, model_save_dir):
     self.jax_rngs = jax.random.key(self.config.rng_seed)
     self.nnx_rngs = nnx.Rngs(self.generate_key())
-    self.sample_rngs = nnx.Rngs(sampling =self.generate_key())
     
     
     self.networks_and_optimizers = create_networks_and_optimizers(self.config, self.game, self.nnx_rngs)
@@ -87,7 +86,7 @@ class Dreamer():
     self.print_each = print_each
     self.save_each = save_each
     self.checkpoint_manager = ocp.CheckpointManager(model_save_dir,
-                                                    item_names = ("network_state", "config", "gameplay_key"),
+                                                    item_names = ("network_state", "config", "jax_rngs"),
                                                     options=options)  
   
   def generate_key(self):
@@ -101,15 +100,29 @@ class Dreamer():
     
   
 
-  
-  def training_step(self):
-    gameplay_batch_key = self.generate_keys(self.config.batch_size)
-    vectorized_sample_trajectories = jax.vmap(self.sample_trajectory_func, in_axes=(0), out_axes=(1))
-    #[Trajectory, Batch, ...]
-    batch_timestep = vectorized_sample_trajectories(gameplay_batch_key)
 
-    loss = self.networks_and_optimizers.world_model_step(batch_timestep, self.sample_rngs)
-    return loss
+  def training_step(self):
+      #TODO: This double jitting is weird.
+      # Try to think of a better structure.
+      @partial(jax.jit, static_argnums=0)
+      def _jit_get_timestep(self):
+        jax_rngs, gameplay_key = jax.random.split(self.jax_rngs)
+        gameplay_batch_key = jax.random.split(gameplay_key, self.config.batch_size)
+        vectorized_sample_trajectories = jax.vmap(self.sample_trajectory_func, in_axes=(0), out_axes=(1))
+        #[Trajectory, Batch, ...]
+        batch_timestep = vectorized_sample_trajectories(gameplay_batch_key)
+
+        return batch_timestep, jax_rngs
+      
+      @nnx.jit
+      def jit_loss_step(networks_and_optimizers, batch_timestep: TimeStep, jax_rngs: jax.random.PRNGKey):
+        jax_rngs, prediction_key = jax.random.split(jax_rngs)
+        loss = networks_and_optimizers.world_model_step(batch_timestep, prediction_key)
+        return loss, jax_rngs
+     
+      timestep, self.jax_rngs = _jit_get_timestep(self)
+      loss, self.jax_rngs = jit_loss_step(self.networks_and_optimizers, timestep, self.jax_rngs)
+      return loss
 
 
 
@@ -119,12 +132,11 @@ class Dreamer():
       self.checkpoint_manager.save(self.learner_steps, args = ocp.args.Composite(
                                                         network_state = ocp.args.StandardSave(nnx.split(self.networks_and_optimizers)[1].to_pure_dict()),
                                                         config = ocp.args.StandardSave(self.config),
-                                                        gameplay_key = ocp.args.ArraySave(self.gameplay_key)))
+                                                        jax_rngs = ocp.args.ArraySave(self.jax_rngs)))
       if self.print_each > 0 and self.learner_steps % self.print_each == 0:
         print(f"Step {self.learner_steps}, loss: {step_loss}")
       self.learner_steps += 1
       self.checkpoint_manager.wait_until_finished()
-    #Also update after training 
     
   def restore_latest_checkpoint(self, step: int=-1):
     """Restore the model from a given saved checkpoint.
@@ -144,14 +156,14 @@ class Dreamer():
                         #Restores as a general PyTree
                         network_state=ocp.args.StandardRestore(None),
                         config = ocp.args.StandardRestore(self.config),
-                        gameplay_key = ocp.args.ArrayRestore(self.gameplay_key))
+                        jax_rngs = ocp.args.ArrayRestore(self.jax_rngs))
     print(f"Restoring model step {restore_step}")
     restored_items = self.checkpoint_manager.restore(restore_step, args=restore_args)
     self.config = restored_items["config"]
     #Also need to restore the last PRNG key that was used, 
     # to ensure that the trajectory sampling will not produce
     # identical data again
-    self.gameplay_key = restored_items["gameplay_key"]
+    self.jax_rngs = restored_items["jax_rngs"]
     #This will not work if a different game,
     # or the same game with different parameters is passed!!!
     new_networks_and_optimizers = create_networks_and_optimizers(self.config, self.game, self.nnx_rngs)
@@ -222,7 +234,7 @@ class Dreamer():
         action = action_oh,
         policy = pi,
         terminal = terminal[..., None],
-        reward = next_rewards
+        reward = next_rewards[..., None]
       )
       return new_carry, timestep
     _, timestep = jax.lax.scan(_sample_trajectory,

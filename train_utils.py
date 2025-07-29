@@ -2,6 +2,7 @@ import chex
 import jax
 import jax.numpy as jnp
 from games.jax_game import GameState
+from functools import partial
 
 
 def symlog(x: jax.Array):
@@ -18,6 +19,7 @@ def get_loss_mean_with_mask(loss: jax.Array, mask: jax.Array) -> jax.Array:
   normalization_factor = jnp.sum(mask)
   summed_loss = jnp.sum(masked_loss)
   return summed_loss / (normalization_factor + (normalization_factor == 0))
+
 
 
 
@@ -42,6 +44,9 @@ class TimeStep():
   
   reward: chex.Array = () # [...,] Reward after playing an action
   terminal: chex.Array = () #[..., 1] Whether state after playing an action was terminal
+
+
+
 
 @chex.dataclass(frozen=True)
 class DreamerConfig():
