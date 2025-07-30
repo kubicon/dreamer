@@ -7,11 +7,12 @@ import orbax.checkpoint as ocp
 from functools import partial
 
 
-from train_utils import DreamerConfig, get_reference_policy, TimeStep
-from networks import create_networks_and_optimizers, DreamerModel
+from train_utils import DreamerConfig, get_reference_policy, TimeStep, get_loss_mean_with_mask, PredictionStep
+from distributions import get_normal_log_prob, get_bin_log_prob, kl_divergence, sample_categorical
+from networks import initialize_dreamer_optimizers, DreamerOptimizers, SequenceModel, Encoder, Decoder, DynamicsPredictor, Predictor
 from games.jax_game import JaxGame, GameState
 
-  
+
 @chex.dataclass(frozen=True)
 class SampleTrajectoryCarry:
   game_state: GameState
@@ -19,22 +20,21 @@ class SampleTrajectoryCarry:
   legal_actions: chex.Array
 
 
-
 class Dreamer():
   """The actual model that handles the dreamer algorithm training.
   For now only the world model networks are used and actor/critic networks are not trained."""
-  def __init__(self, config: DreamerConfig, game: JaxGame,  save_each=-1, print_each=-1, model_save_dir=""):
+  def __init__(self, config: DreamerConfig, game: JaxGame):
     self.config = config
     self.game = game
-    self.init(save_each, print_each, model_save_dir)
+    self.init()
     
     
-  def init(self, save_each, print_each, model_save_dir):
+  def init(self):
     self.jax_rngs = jax.random.key(self.config.rng_seed)
     self.nnx_rngs = nnx.Rngs(self.generate_key())
     
     
-    self.networks_and_optimizers = create_networks_and_optimizers(self.config, self.game, self.nnx_rngs)
+    self.optimizers = initialize_dreamer_optimizers(self.config, self.game, self.nnx_rngs)
     self.learner_steps = 0
 
     self.trajectory_max = self.game.max_trajectory_length()
@@ -43,51 +43,31 @@ class Dreamer():
     self.sample_trajectory_func = self.sample_trajectory if self.is_multi_agent else self.sample_trajectory_single_agent
 
     self._get_example_timestep()
-    self.prepare_checkpointer(save_each, print_each, model_save_dir)
+    self.cached_train = nnx.cached_partial(self.world_model_train, self.optimizers)
     
   
   def _get_example_timestep(self):
-        dummy_key = jax.random.key(0)
-        example_state, example_legals = self.game.initialize_structures(dummy_key)
-        if self.is_multi_agent:
-          ex_state_tensor, ex_p1_iset, ex_p2_iset, ex_public_state = self.game.get_info(example_state)
-          ex_obs = jnp.stack([ex_p1_iset, ex_p2_iset], axis=0)
-        else:
-          ex_state_tensor, ex_obs = self.game.get_info(example_state)
-        valid = jnp.zeros(1, dtype=bool)
-        legal = jnp.ones_like(example_legals)
-        #the squeeze on axis 0 is for correct shape in a single agent environment
-        action = jnp.squeeze(jnp.tile(nnx.one_hot(0, legal.shape[-1]), (self.game.num_players(), 1)), axis=0)
-        policy = legal.astype(float) / jnp.sum(legal, axis=-1, keepdims=True)
-        reward = jnp.zeros(1, dtype=float)
-        terminal = jnp.zeros(1, dtype=bool)
-        self.example_timestep = TimeStep(valid = valid,
-                                        obs= ex_obs,
-                                        action=action,
-                                        legal=legal,
-                                        policy = policy,
-                                        reward = reward,
-                                        terminal = terminal)
-  
-  def prepare_checkpointer(self, save_each, print_each, model_save_dir):
-    """Initialize the checkpointer with given subdirectory and save_each configuration"""
-    empty = ""
-    game_params = self.game.params_dict()
-    game_name = self.game.game_name()
-    params_str = f'{empty.join(f"_{value}" for key, value in game_params.items())}'
-    if not model_save_dir:
-      model_save_dir = f"/trained_networks/{game_name}{params_str}/seed{self.config.seed}/network_seed{self.config.rng_seed}"
-      model_save_dir = os.getcwd() + model_save_dir
-    print(F"Saving at {model_save_dir}")
-    options = ocp.CheckpointManagerOptions(
-          save_interval_steps=save_each if save_each > 0 else None,
-          create=True
-      )
-    self.print_each = print_each
-    self.save_each = save_each
-    self.checkpoint_manager = ocp.CheckpointManager(model_save_dir,
-                                                    item_names = ("network_state", "config", "jax_rngs"),
-                                                    options=options)  
+    dummy_key = jax.random.key(0)
+    example_state, example_legals = self.game.initialize_structures(dummy_key)
+    if self.is_multi_agent:
+      ex_state_tensor, ex_p1_iset, ex_p2_iset, ex_public_state = self.game.get_info(example_state)
+      ex_obs = jnp.stack([ex_p1_iset, ex_p2_iset], axis=0)
+    else:
+      ex_state_tensor, ex_obs = self.game.get_info(example_state)
+    valid = jnp.zeros(1, dtype=bool)
+    legal = jnp.ones_like(example_legals)
+    #the squeeze on axis 0 is for correct shape in a single agent environment
+    action = jnp.squeeze(jnp.tile(nnx.one_hot(0, legal.shape[-1]), (self.game.num_players(), 1)), axis=0)
+    policy = legal.astype(float) / jnp.sum(legal, axis=-1, keepdims=True)
+    reward = jnp.zeros(1, dtype=float)
+    terminal = jnp.zeros(1, dtype=bool)
+    self.example_timestep = TimeStep(valid = valid,
+                                    obs= ex_obs,
+                                    action=action,
+                                    legal=legal,
+                                    policy = policy,
+                                    reward = reward,
+                                    terminal = terminal)
   
   def generate_key(self):
     self.jax_rngs, key = jax.random.split(self.jax_rngs)
@@ -98,84 +78,12 @@ class Dreamer():
     keys = jax.random.split(split_key, num_keys)
     return keys
     
+
+  @partial(nnx.jit, static_argnums=(0, 1))
+  def sample_trajectories(self,  batch_size, key):
+    keys = jax.random.split(key, batch_size)
+    return nnx.vmap(self.sample_trajectory_func, in_axes=0, out_axes=1)(keys)
   
-
-
-  def training_step(self):
-      #TODO: This double jitting is weird.
-      # Try to think of a better structure.
-      @partial(jax.jit, static_argnums=0)
-      def _jit_get_timestep(self):
-        jax_rngs, gameplay_key = jax.random.split(self.jax_rngs)
-        gameplay_batch_key = jax.random.split(gameplay_key, self.config.batch_size)
-        vectorized_sample_trajectories = jax.vmap(self.sample_trajectory_func, in_axes=(0), out_axes=(1))
-        #[Trajectory, Batch, ...]
-        batch_timestep = vectorized_sample_trajectories(gameplay_batch_key)
-
-        return batch_timestep, jax_rngs
-      
-      @nnx.jit
-      def jit_loss_step(networks_and_optimizers, batch_timestep: TimeStep, jax_rngs: jax.random.PRNGKey):
-        jax_rngs, prediction_key = jax.random.split(jax_rngs)
-        loss = networks_and_optimizers.world_model_step(batch_timestep, prediction_key)
-        return loss, jax_rngs
-     
-      timestep, self.jax_rngs = _jit_get_timestep(self)
-      loss, self.jax_rngs = jit_loss_step(self.networks_and_optimizers, timestep, self.jax_rngs)
-      return loss
-
-
-
-  def train_model(self, num_steps):
-    for s in range(num_steps):
-      step_loss = self.training_step()
-      self.checkpoint_manager.save(self.learner_steps, args = ocp.args.Composite(
-                                                        network_state = ocp.args.StandardSave(nnx.split(self.networks_and_optimizers)[1].to_pure_dict()),
-                                                        config = ocp.args.StandardSave(self.config),
-                                                        jax_rngs = ocp.args.ArraySave(self.jax_rngs)))
-      if self.print_each > 0 and self.learner_steps % self.print_each == 0:
-        print(f"Step {self.learner_steps}, loss: {step_loss}")
-      self.learner_steps += 1
-      self.checkpoint_manager.wait_until_finished()
-    
-  def restore_latest_checkpoint(self, step: int=-1):
-    """Restore the model from a given saved checkpoint.
-    If step = -1 is provided, the last saved checkpoint is restored.
-    Ensure this class has been initialized with the same game 
-    and same parameters as the model checkpoint that you are attempting 
-    to restore!!!""" 
-    latest_step = self.checkpoint_manager.latest_step()
-    all_steps = self.checkpoint_manager.all_steps()
-    restore_step = step if step > -1 else latest_step
-    assert latest_step is not None, "No network checkpoint was found!"
-    assert restore_step in all_steps, f"Network checkpoint from step {restore_step} does not exist!"
-    #We restore the saved config 
-    # and network state. Then use the config to initialize self.networks_and_optimizers anew,
-    # because the provided dummy config could cause shape mismatch. Then, finally
-    restore_args = ocp.args.Composite(
-                        #Restores as a general PyTree
-                        network_state=ocp.args.StandardRestore(None),
-                        config = ocp.args.StandardRestore(self.config),
-                        jax_rngs = ocp.args.ArrayRestore(self.jax_rngs))
-    print(f"Restoring model step {restore_step}")
-    restored_items = self.checkpoint_manager.restore(restore_step, args=restore_args)
-    self.config = restored_items["config"]
-    #Also need to restore the last PRNG key that was used, 
-    # to ensure that the trajectory sampling will not produce
-    # identical data again
-    self.jax_rngs = restored_items["jax_rngs"]
-    #This will not work if a different game,
-    # or the same game with different parameters is passed!!!
-    new_networks_and_optimizers = create_networks_and_optimizers(self.config, self.game, self.nnx_rngs)
-    graphdef, current_state = nnx.split(new_networks_and_optimizers)
-    saved_state = restored_items["network_state"]
-    current_state.replace_by_pure_dict(saved_state)
-    self.networks_and_optimizers = nnx.merge(graphdef, current_state)
-    #Remember where the training ended
-    self.learner_steps = restore_step
-
-
-
 
   @partial(jax.jit, static_argnums=0)
   def sample_trajectory_single_agent(self, key) ->TimeStep:
@@ -183,6 +91,7 @@ class Dreamer():
     game.max_trajectory_lenght turns (using valid to
     mask out invalid states that appear when playing post terminal).
     This is the single agent version."""
+    # TODO: Can we find some common interface so we do not repeat most of the stuff twice.
     init_key, trajectory_key, = jax.random.split(key)
     trajectory_key = jax.random.split(trajectory_key, self.trajectory_max)
     
@@ -242,7 +151,7 @@ class Dreamer():
              xs=(trajectory_key, jnp.arange(self.trajectory_max)))
     #[Trajectory, ...]
     return timestep
-
+  
   @partial(jax.jit, static_argnums=0)
   def sample_trajectory(self, key) ->TimeStep:
     """Samples trajectories from the game for 
@@ -312,11 +221,115 @@ class Dreamer():
              xs=(trajectory_key, jnp.arange(self.trajectory_max)))
     #[Trajectory, ...]
     return timestep
+  
+  def update_world_model(self, optimizers: DreamerOptimizers, timestep, rng_key):
+    """Compound loss for the entire world model."""
+    sample_keys = jax.random.split(rng_key, self.trajectory_max * self.config.batch_size)
+    sample_keys = sample_keys.reshape((self.trajectory_max, self.config.batch_size))
+    
+    def world_model_loss(sequence_model: SequenceModel, encoder: Encoder, decoder: Decoder, dynamics_model: DynamicsPredictor, predictor: Predictor):
+      # return 0.0
+      l_pred, l_dyn, l_rep = 0, 0, 0
+      #[Trajectory, Batch, ...]
+      @nnx.scan(in_axes=(nnx.Carry, 0), out_axes=(nnx.Carry, 0))
+      def _predict_over_timestep(carry, xs):
+        sequence_model, encoder, decoder, dynamics_model, predictor, hidden_state = carry
+        action, obs, cur_key = xs
+        stochastic_state = encoder(hidden_state, obs)
+        deterministic_state = sample_categorical(stochastic_state, cur_key)
+        next_stochastic_state = dynamics_model(hidden_state)
+        reward, done = predictor(hidden_state, deterministic_state)
+        decoded_obs = decoder(hidden_state, deterministic_state)
+        gru_input = jnp.concatenate([deterministic_state.reshape(*deterministic_state.shape[:-2], -1), action], axis=-1) 
+        new_hidden = sequence_model(hidden_state, gru_input)
+        preds = PredictionStep(repr_state = stochastic_state,
+                                decoded_obs = decoded_obs,
+                                reward_dist_logit = reward,
+                                done_logit = done,
+                                dynamics_state = next_stochastic_state)
+        new_carry = (sequence_model, encoder, decoder, dynamics_model, predictor, new_hidden)
+        return new_carry, preds
+      
+      xs = (timestep.action, timestep.obs, sample_keys)
+      init_carry = jnp.zeros((self.config.batch_size, self.config.hidden_state_size)) 
+      init_hidden = (sequence_model, encoder, decoder, dynamics_model, predictor, init_carry)
+      vectorized_predict = nnx.vmap(_predict_over_timestep, in_axes=((None, None, None, None, None, 0), (1, 1, 1)), out_axes=((None, None, None, None, None, 0), 1))
+      final_hidden, predictions = vectorized_predict(init_hidden, xs) 
+       
+      #jax.debug.breakpoint()
+      #[Trajectory, Batch, obs_size]
+      reconstruction_loss = -get_normal_log_prob(predictions.decoded_obs, timestep.obs, use_symlog=True)
+      l_pred += get_loss_mean_with_mask(reconstruction_loss, timestep.valid[..., None])
+      #[Trajectory, Batch, 1]
+      continuation_loss = -get_normal_log_prob(predictions.done_logit, timestep.terminal.astype(int))
+      l_pred += get_loss_mean_with_mask(continuation_loss, timestep.valid[..., None])
+      #[Trajectory, Batch, 2* bin_range + 1]
+      bins = jnp.arange((2 * self.config.bin_range) + 1) - self.config.bin_range
+      reward_loss = -get_bin_log_prob(predictions.reward_dist_logit, bins, timestep.reward, use_symlog=True)
+      l_pred += get_loss_mean_with_mask(reward_loss, timestep.valid[..., None])
 
+      #Using free bits to clip dynamics and representation losses
+      # to 1, thus disabling their gradient when they are below 1
+      #[Trajectory, Batch, encoded_categories, encoded_classes]
+      posterior = nnx.softmax(predictions.repr_state, axis=-1)
+      prior = nnx.softmax(predictions.dynamics_state, axis=-1)
+      #[Trajectory, Batch]
+      dynamics_loss = jnp.maximum(1, kl_divergence(jax.lax.stop_gradient(posterior), prior))
+      l_dyn += get_loss_mean_with_mask(dynamics_loss, timestep.valid)
+      #[Trajectory, Batch]
+      repr_loss = jnp.maximum(1, kl_divergence(posterior, jax.lax.stop_gradient(prior)))
+      l_rep += get_loss_mean_with_mask(repr_loss, timestep.valid)
+
+
+      return self.config.beta_prediction * l_pred + self.config.beta_dynamics * l_dyn + self.config.beta_representation * l_rep
   
+    loss, grad = nnx.value_and_grad(world_model_loss, argnums=(0, 1, 2, 3, 4))(optimizers.sequence_optimizer.model, optimizers.encoder_optimizer.model, optimizers.decoder_optimizer.model, optimizers.dynamics_optimizer.model, optimizers.predictor_optimizer.model)
+    
+    optimizers.sequence_optimizer.update(grad[0])
+    optimizers.encoder_optimizer.update(grad[1])
+    optimizers.decoder_optimizer.update(grad[2])
+    optimizers.dynamics_optimizer.update(grad[3])
+    optimizers.predictor_optimizer.update(grad[4])
+    
+    return loss
   
-  
-  
-  
-  
-  
+  # Unlike flax.linen, nnx.jit allows updating the model itself.
+  @partial(nnx.jit, static_argnums=(0))
+  def world_model_train(self, optimizers, rng_key):
+    trajectory_key, train_key = jax.random.split(rng_key)
+    timestep = self.sample_trajectories(self.config.batch_size, trajectory_key)
+    loss = self.update_world_model(optimizers,timestep, train_key)
+    return loss
+    
+
+  def world_model_train_step(self):
+    rng_key = self.generate_key()
+    return self.world_model_train(self.optimizers, rng_key)
+    # return self.cached_train(rng_key)
+   
+  def __getstate__(self):
+    return {
+      "config": self.config,
+      "game": self.game,
+      "jax_rngs": self.jax_rngs,
+      "nnx_rngs": nnx.state(self.nnx_rngs),
+      "optimizers": nnx.state(self.optimizers)
+    } 
+    
+    
+  def __setstate__(self, state):
+    self.config = state["config"]
+    self.game = state["game"]
+    
+    self.init()
+    
+    def update_nnx(model_optimizer, load_optimizer):
+      static_graph, _ = nnx.split(model_optimizer)
+      model_optimizer = nnx.merge(static_graph, load_optimizer)
+      return model_optimizer
+    
+    self.jax_rngs = state["jax_rngs"]
+    self.nnx_rngs = update_nnx(self.nnx_rngs, state["nnx_rngs"])
+    self.optimizers = update_nnx(self.optimizers, state["optimizers"])
+    
+    

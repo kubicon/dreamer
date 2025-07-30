@@ -1,9 +1,9 @@
 import chex
 import jax
 import jax.numpy as jnp
-from games.jax_game import GameState
-from functools import partial
-
+from games.jax_game import GameState 
+import os
+import pickle
 
 def symlog(x: jax.Array):
   return jnp.sign(x) * jnp.log(jnp.abs(x) + 1)
@@ -19,8 +19,6 @@ def get_loss_mean_with_mask(loss: jax.Array, mask: jax.Array) -> jax.Array:
   normalization_factor = jnp.sum(mask)
   summed_loss = jnp.sum(masked_loss)
   return summed_loss / (normalization_factor + (normalization_factor == 0))
-
-
 
 
 
@@ -79,3 +77,14 @@ def get_reference_policy(game_state: GameState, legal_actions: jax.Array):
   """Returns the reference sampling policy. For now returns just a uniform policy.
   TODO: This is just for the basic testing, change this function"""
   return legal_actions / legal_actions.sum(axis=-1, keepdims=True)
+
+
+def save_model(model, path): 
+  os.makedirs(os.path.dirname(path), exist_ok=True)
+  with open(path, "wb") as f:
+    pickle.dump(model, f)
+    
+def load_model(path):
+  with open(path, "rb") as f:
+    return pickle.load(f)
+  

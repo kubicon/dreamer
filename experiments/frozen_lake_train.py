@@ -73,14 +73,9 @@ def main():
   fl_game = parse_game(args.game_config_path)
   model = Dreamer(
       config=config,
-      game = fl_game,
-      save_each=args.save_each,
-      print_each=args.print_each,
-      model_save_dir=args.model_save_dir,
-  )
-  model.train_model(
-      num_steps=args.num_steps,
-  )
+      game = fl_game, 
+  ) 
+  model.world_model_train_step()
 
 if __name__ == "__main__":
   main()

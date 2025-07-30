@@ -153,148 +153,25 @@ class DreamerOptimizers():
   dynamics_optimizer: nnx.Optimizer
   predictor_optimizer: nnx.Optimizer
 
-
-@chex.dataclass(frozen=True)
-class WorldModelNetworks():
-  sequence_network: SequenceModel
-  encoder_network: Encoder
-  decoder_network: Decoder
-  dynamics_network: DynamicsPredictor
-  predictor_network: Predictor
-
-    
-class DreamerModel(nnx.Module):
-  """Container for all the Dreamer networks.
-  The optimizers are also contained within this module, so that a single 
-  split gives a state of all the networks for checkpointing"""
-  def __init__(self, world_model_networks: WorldModelNetworks, optims: DreamerOptimizers, config:DreamerConfig, trajectory_max:int):
-    self.sequence_network = world_model_networks.sequence_network
-    self.encoder_network = world_model_networks.encoder_network
-    self.decoder_network = world_model_networks.decoder_network
-    self.dynamics_network = world_model_networks.dynamics_network
-    self.predictor_network = world_model_networks.predictor_network
-
-    self.sequence_optimizer = optims.sequence_optimizer
-    self.encoder_optimizer = optims.encoder_optimizer
-    self.decoder_optimizer = optims.decoder_optimizer
-    self.dynamics_optimizer = optims.dynamics_optimizer
-    self.predictor_optimizer = optims.predictor_optimizer
-
-    self.beta_prediction = config.beta_prediction
-    self.beta_dynamics = config.beta_dynamics
-    self.beta_representation = config.beta_representation
-
-
-    self.trajectory_max = trajectory_max
-    self.batch_size = config.batch_size
-    self.hidden_state_size = config.hidden_state_size
-
-    #Create an array with elements from [-bin_range, ..., bin_range] bounds inclusive
-    self.bins = jnp.arange((2 * config.bin_range) + 1) -config.bin_range
-    
-      
-
-  @nnx.jit
-  def __call__(self, timestep: TimeStep, sample_key:jax.random.PRNGKey):
-    """Perform a world model prediction step over the whole batch and trajectory, given
-    the collected trajectories timestep and a single PRNG key, to handle sampling from categoricals"""
-    #initial_hidden = jnp.tile(self.sequence_network.init_hidden, (self.batch_size, 1))
-    initial_hidden = jnp.zeros((self.batch_size, self.hidden_state_size))
-    sample_keys = jax.random.split(sample_key, self.trajectory_max * self.batch_size)
-    sample_keys = sample_keys.reshape((self.trajectory_max, self.batch_size))
-
-    xs = (timestep.action, timestep.obs, sample_keys)
-    @nnx.scan(in_axes=(nnx.Carry, 0), out_axes=(nnx.Carry, 0))
-    def _predict_over_timestep(carry, xs):
-      model, hidden_state = carry
-      action, obs, cur_key = xs
-      stochastic_state = model.encoder_network(hidden_state, obs)
-      deterministic_state = sample_categorical(stochastic_state, cur_key)
-      next_stochastic_state = model.dynamics_network(hidden_state)
-      reward, done = model.predictor_network(hidden_state, deterministic_state)
-      decoded_obs = model.decoder_network(hidden_state, deterministic_state)
-      gru_input = jnp.concatenate([deterministic_state.reshape(*deterministic_state.shape[:-2], -1), action], axis=-1) 
-      new_hidden = model.sequence_network(hidden_state, gru_input)
-      preds = PredictionStep(repr_state = stochastic_state,
-                              decoded_obs = decoded_obs,
-                              reward_dist_logit = reward,
-                              done_logit = done,
-                              dynamics_state = next_stochastic_state)
-      new_carry = (model, new_hidden)
-      return new_carry, preds
-    init_carry = (self, initial_hidden)
-    vectorized_predict = nnx.vmap(_predict_over_timestep, in_axes=((None, 0), (1, 1, 1)), out_axes=((None, 0), 1))
-    #final_hidden, all_preds = _predict_over_timestep(init_carry, xs)
-    final_hidden, all_preds = vectorized_predict(init_carry, xs)
-    return all_preds
-
-  def world_model_loss(self, timestep: TimeStep, key:jax.random.PRNGKey):
-    """Compound loss for the entire world model."""
-    l_pred, l_dyn, l_rep = 0, 0, 0
-    #[Trajectory, Batch, ...]
-    predictions = self(timestep, key)
-    #jax.debug.breakpoint()
-    #[Trajectory, Batch, obs_size]
-    reconstruction_loss = -get_normal_log_prob(predictions.decoded_obs, timestep.obs, use_symlog=True)
-    l_pred += get_loss_mean_with_mask(reconstruction_loss, timestep.valid[..., None])
-    #[Trajectory, Batch, 1]
-    continuation_loss = -get_normal_log_prob(predictions.done_logit, timestep.terminal.astype(int))
-    l_pred += get_loss_mean_with_mask(continuation_loss, timestep.valid[..., None])
-    #[Trajectory, Batch, 2* bin_range + 1]
-    reward_loss = -get_bin_log_prob(predictions.reward_dist_logit, self.bins, timestep.reward, use_symlog=True)
-    l_pred += get_loss_mean_with_mask(reward_loss, timestep.valid[..., None])
-
-    #Using free bits to clip dynamics and representation losses
-    # to 1, thus disabling their gradient when they are below 1
-    #[Trajectory, Batch, encoded_categories, encoded_classes]
-    posterior = nnx.softmax(predictions.repr_state, axis=-1)
-    prior = nnx.softmax(predictions.dynamics_state, axis=-1)
-    #[Trajectory, Batch]
-    dynamics_loss = jnp.maximum(1, kl_divergence(jax.lax.stop_gradient(posterior), prior))
-    l_dyn += get_loss_mean_with_mask(dynamics_loss, timestep.valid)
-    #[Trajectory, Batch]
-    repr_loss = jnp.maximum(1, kl_divergence(posterior, jax.lax.stop_gradient(prior)))
-    l_rep += get_loss_mean_with_mask(repr_loss, timestep.valid)
-
-
-    return self.beta_prediction * l_pred + self.beta_dynamics * l_dyn + self.beta_representation * l_rep
-
-
-  @nnx.jit
-  def world_model_step(self, timestep: TimeStep, key:jax.random.PRNGKey)->float:
-    """Wrapper performing a single gradient step on the world model."""
-    def _loss_fn(model):
-      return model.world_model_loss(timestep, key)
-    loss, all_grads = nnx.value_and_grad(_loss_fn)(self)
-    #TODO: Do we want a separate optimizer for each network
-    # or a single joint optimizer for the whole model?
-    self.sequence_optimizer.update(all_grads.sequence_network)
-    self.encoder_optimizer.update(all_grads.encoder_network)
-    self.decoder_optimizer.update(all_grads.decoder_network)
-    self.dynamics_optimizer.update(all_grads.dynamics_network)
-    self.predictor_optimizer.update(all_grads.predictor_network)
-    return loss
-
-
-
- 
   
   
-def create_networks_and_optimizers(config: DreamerConfig, game: JaxGame, rngs: nnx.Rngs) ->DreamerModel:
-  """Initializes the model networks and optimizers. For now actor and critic networks are not used"""
-  sequence_model =  SequenceModel(
+def initialize_dreamer_optimizers(config: DreamerConfig, game: JaxGame, rngs: nnx.Rngs) -> DreamerOptimizers:
+  """Initializes the model networks and optimizers. For now actor and critic networks are not used""" 
+
+  sequence_optimizer = nnx.Optimizer(
+    model= SequenceModel(
         encoded_classes=config.encoded_classes,
         encoded_categories=config.encoded_categories,
         action_features=game.num_distinct_actions(),
         hidden_state_size=config.hidden_state_size,
         rngs=rngs
-    )
-
-  sequence_optimizer = nnx.Optimizer(
-    model= sequence_model,
+    ),
     tx=optax.adam(learning_rate=config.learning_rate),
   )
-  encoder = Encoder(
+  
+
+  encoder_optimizer = nnx.Optimizer(
+    model= Encoder(
         hidden_state_size=config.hidden_state_size,
         observation_features=game.observation_tensor_shape(),
         encoded_classes=config.encoded_classes,
@@ -302,14 +179,12 @@ def create_networks_and_optimizers(config: DreamerConfig, game: JaxGame, rngs: n
         hidden_features=config.encoder_network_details[0],
         num_layers=config.encoder_network_details[1],
         rngs=rngs
-    )
-
-  encoder_optimizer = nnx.Optimizer(
-    model= encoder,
+    ),
     tx=optax.adam(learning_rate=config.learning_rate),
   )
 
-  decoder = Decoder(
+  decoder_optimizer = nnx.Optimizer(
+    model= Decoder(
         hidden_state_size=config.hidden_state_size,
         observation_features=game.observation_tensor_shape(),
         encoded_classes=config.encoded_classes,
@@ -317,26 +192,24 @@ def create_networks_and_optimizers(config: DreamerConfig, game: JaxGame, rngs: n
         hidden_features=config.decoder_network_details[0],
         num_layers=config.decoder_network_details[1],
         rngs=rngs
-    )
-  
-  decoder_optimizer = nnx.Optimizer(
-    model= decoder,
+    ),
     tx=optax.adam(learning_rate=config.learning_rate),
   )
-  dynamics = DynamicsPredictor(
+
+  dynamics_optimizer = nnx.Optimizer(
+    model= DynamicsPredictor(
         hidden_state_size=config.hidden_state_size,
         encoded_classes=config.encoded_classes,
         encoded_categories=config.encoded_categories,
         hidden_features=config.dynamics_network_details[0],
         num_layers=config.dynamics_network_details[1],
         rngs=rngs
-    )
-
-  dynamics_optimizer = nnx.Optimizer(
-    model= dynamics,
+    ),
     tx=optax.adam(learning_rate=config.learning_rate),
   )
-  predictor = Predictor(
+
+  predictor_optimizer = nnx.Optimizer(
+    model= Predictor(
         hidden_state_size=config.hidden_state_size,
         encoded_classes=config.encoded_classes,
         encoded_categories=config.encoded_categories,
@@ -344,19 +217,10 @@ def create_networks_and_optimizers(config: DreamerConfig, game: JaxGame, rngs: n
         hidden_features=config.predictor_network_details[0],
         num_layers=config.predictor_network_details[1],
         rngs=rngs
-    )
-
-  predictor_optimizer = nnx.Optimizer(
-    model= predictor,
+      ),
     tx=optax.adam(learning_rate=config.learning_rate),
   )
-  world_model_networks = WorldModelNetworks(
-    sequence_network=sequence_model,
-    encoder_network=encoder,
-    decoder_network=decoder,
-    dynamics_network=dynamics,
-    predictor_network=predictor
-  )
+  
   optims = DreamerOptimizers(
     sequence_optimizer=sequence_optimizer,
     encoder_optimizer=encoder_optimizer,
@@ -365,4 +229,4 @@ def create_networks_and_optimizers(config: DreamerConfig, game: JaxGame, rngs: n
     predictor_optimizer=predictor_optimizer
   )
 
-  return DreamerModel(world_model_networks, optims, config, game.max_trajectory_length())
+  return optims
