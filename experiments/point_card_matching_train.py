@@ -1,9 +1,10 @@
 from argparse import ArgumentParser
 import numpy as np
 from dreamer import Dreamer, DreamerConfig
-from experiments.parse_frozen_lake import parse_game
-from train_utils import save_model
 import os
+
+from games.point_card_matching import PointCardMatching, PointCardMatchingStochastic
+from train_utils import save_model
 
 
 parser = ArgumentParser()
@@ -31,7 +32,8 @@ parser.add_argument("--predictor_hidden_layers", type=int, default=1, help="Numb
 parser.add_argument("--bin_range", type=int, default=20, help="Number of the exponentially spaced bins for certain predictions such as reward in one direction, bins will be spaced out as symexp([-bin_range, ..., bin_range])")
 
 # Game parameters
-parser.add_argument("--game_config_path", type=str, default="game_instances/frozen_lake3x3_(2,2)_50_0.1.txt", help="Path to the file containing the frozen lake domain configuration")
+parser.add_argument("--num_cards", type=int, default=3, help="Number of cards of the game. Should be at least 3")
+parser.add_argument("--stochastic", type=bool, default=False, help="Whether to use the point card matching with chance node, or the one without.")
 
 # Training parameters
 parser.add_argument("--num_steps", type=int, default=1001, help="Number of training steps")
@@ -72,19 +74,18 @@ def main():
       learning_rate = args.learning_rate,
       rng_seed = args.network_seed
   )
-  
-  fl_game = parse_game(args.game_config_path)
+  pcm_game = PointCardMatchingStochastic(args.num_cards) if args.stochastic else PointCardMatching(args.num_cards)
   model_save_dir = args.model_save_dir
-  game_name = fl_game.game_name()
+  game_name = pcm_game.game_name()
   empty = ""
-  game_params = fl_game.params_dict()
+  game_params = pcm_game.params_dict()
   params_str = f'{empty.join(f"_{value}" for key, value in game_params.items())}'
   if not model_save_dir:
       model_save_dir = f"/trained_networks/{game_name}{params_str}/seed{args.trajectory_seed}/network_seed{args.network_seed}/"
       model_save_dir = os.getcwd() + model_save_dir
   model = Dreamer(
       config=config,
-      game = fl_game, 
+      game = pcm_game,
   )
   for i in range(args.num_steps):
     loss = model.world_model_train_step()

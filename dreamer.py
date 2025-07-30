@@ -256,7 +256,6 @@ class Dreamer():
       vectorized_predict = nnx.vmap(_predict_over_timestep, in_axes=((None, None, None, None, None, 0), (1, 1, 1)), out_axes=((None, None, None, None, None, 0), 1))
       final_hidden, predictions = vectorized_predict(init_hidden, xs) 
        
-      #jax.debug.breakpoint()
       #[Trajectory, Batch, obs_size]
       reconstruction_loss = -get_normal_log_prob(predictions.decoded_obs, timestep.obs, use_symlog=True)
       l_pred += get_loss_mean_with_mask(reconstruction_loss, timestep.valid[..., None])
