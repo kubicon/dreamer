@@ -18,6 +18,7 @@ class SampleTrajectoryCarry:
   game_state: GameState
   terminal: bool
   legal_actions: chex.Array
+  valid: bool
 
 
 class Dreamer():
@@ -37,7 +38,10 @@ class Dreamer():
     self.optimizers = initialize_dreamer_optimizers(self.config, self.game, self.nnx_rngs)
     self.learner_steps = 0
 
-    self.trajectory_max = self.game.max_trajectory_length()
+    #We want + 1. since we want the terminal state as well
+    # as representation should be also trained on those
+    self.trajectory_max = self.game.max_trajectory_length() + 1
+
     self.action_dimension = self.game.num_distinct_actions()
     self.is_multi_agent = self.game.num_players() > 1
     self.sample_trajectory_func = self.sample_trajectory if self.is_multi_agent else self.sample_trajectory_single_agent
@@ -61,7 +65,8 @@ class Dreamer():
     policy = legal.astype(float) / jnp.sum(legal, axis=-1, keepdims=True)
     reward = jnp.zeros(1, dtype=float)
     terminal = jnp.zeros(1, dtype=bool)
-    self.example_timestep = TimeStep(valid = valid,
+    self.example_timestep = TimeStep(action_valid = valid,
+                                    state_valid = valid,
                                     obs= ex_obs,
                                     action=action,
                                     legal=legal,
@@ -102,6 +107,7 @@ class Dreamer():
     init_carry = SampleTrajectoryCarry(
       game_state = game_state,
       terminal = False,
+      valid = True,
       legal_actions = legal_actions
     )
     
@@ -126,18 +132,21 @@ class Dreamer():
       action, action_oh = choice_wrapper(key, pi)
       next_game_state, terminal, next_rewards, next_legal = self.game.apply_action(carry.game_state, action_key, turn, action)
       #Action in terminal state is not valid
-      valid = (jnp.ones_like(next_rewards, dtype=int) - carry.terminal).astype(bool)
-      terminal = jnp.where(valid, terminal, True)
+      action_valid = (jnp.ones_like(next_rewards, dtype=int) - carry.terminal).astype(bool)
+      state_valid = (jnp.ones_like(next_rewards, dtype=int) - carry.valid).astype(bool)
+      terminal = jnp.where(action_valid, terminal, True)
       #We need state tensor to be defined in terminal state as well
-      next_rewards = jnp.where(valid, next_rewards, jnp.zeros_like(next_rewards))
-      obs = jnp.where(valid, obs, self.example_timestep.obs)   
+      next_rewards = jnp.where(action_valid, next_rewards, jnp.zeros_like(next_rewards))
+      obs = jnp.where(state_valid, obs, self.example_timestep.obs)   
       new_carry = SampleTrajectoryCarry(
         game_state = next_game_state,
         terminal = terminal,
+        valid = action_valid,
         legal_actions=jnp.where(terminal, self.example_timestep.legal, next_legal)
       )
       timestep = TimeStep(
-        valid = valid,
+        action_valid = action_valid,
+        state_valid = state_valid,
         obs = obs,
         legal = carry.legal_actions,
         action = action_oh,
@@ -168,6 +177,7 @@ class Dreamer():
     init_carry = SampleTrajectoryCarry(
       game_state = game_state,
       terminal = False,
+      valid = True,
       legal_actions = legal_actions
     )
     
@@ -196,18 +206,21 @@ class Dreamer():
       action, action_oh = vectorized_sample_action(sample_key, pi)
       next_game_state, terminal, next_rewards, next_legal = self.game.apply_action(carry.game_state, action_key, turn, action)
       #Action in terminal state is not valid
-      valid = (jnp.ones_like(next_rewards, dtype=int) - carry.terminal).astype(bool)
-      terminal = jnp.where(valid, terminal, True)
+      action_valid = (jnp.ones_like(next_rewards, dtype=int) - carry.terminal).astype(bool)
+      state_valid = (jnp.ones_like(next_rewards, dtype=int) - carry.valid).astype(bool)
+      terminal = jnp.where(action_valid, terminal, True)
       #We need state tensor to be defined in terminal state as well
-      next_rewards = jnp.where(valid, next_rewards, jnp.zeros_like(next_rewards))
-      obs = jnp.where(valid, obs, self.example_timestep.obs)   
+      next_rewards = jnp.where(action_valid, next_rewards, jnp.zeros_like(next_rewards))
+      obs = jnp.where(state_valid, obs, self.example_timestep.obs)   
       new_carry = SampleTrajectoryCarry(
         game_state = next_game_state,
         terminal = terminal,
+        valid = action_valid,
         legal_actions=jnp.where(terminal, self.example_timestep.legal, next_legal)
       )
       timestep = TimeStep(
-        valid = valid,
+        action_valid = action_valid,
+        state_valid = state_valid,
         obs = obs,
         legal = carry.legal_actions,
         action = action_oh,
@@ -222,13 +235,12 @@ class Dreamer():
     #[Trajectory, ...]
     return timestep
   
-  def update_world_model(self, optimizers: DreamerOptimizers, timestep, rng_key):
+  def update_world_model(self, optimizers: DreamerOptimizers, timestep: TimeStep, rng_key):
     """Compound loss for the entire world model."""
     sample_keys = jax.random.split(rng_key, self.trajectory_max * self.config.batch_size)
     sample_keys = sample_keys.reshape((self.trajectory_max, self.config.batch_size))
     
     def world_model_loss(sequence_model: SequenceModel, encoder: Encoder, decoder: Decoder, dynamics_model: DynamicsPredictor, predictor: Predictor):
-      # return 0.0
       l_pred, l_dyn, l_rep = 0, 0, 0
       #[Trajectory, Batch, ...]
       @nnx.scan(in_axes=(nnx.Carry, 0), out_axes=(nnx.Carry, 0))
@@ -258,26 +270,28 @@ class Dreamer():
        
       #[Trajectory, Batch, obs_size]
       reconstruction_loss = -get_normal_log_prob(predictions.decoded_obs, timestep.obs, use_symlog=True)
-      l_pred += get_loss_mean_with_mask(reconstruction_loss, timestep.valid[..., None])
+      l_pred += get_loss_mean_with_mask(reconstruction_loss, timestep.state_valid[..., None])
       #[Trajectory, Batch, 1]
       continuation_loss = -get_normal_log_prob(predictions.done_logit, timestep.terminal.astype(int))
-      l_pred += get_loss_mean_with_mask(continuation_loss, timestep.valid[..., None])
+      l_pred += get_loss_mean_with_mask(continuation_loss, timestep.action_valid[..., None])
       #[Trajectory, Batch, 2* bin_range + 1]
       bins = jnp.arange((2 * self.config.bin_range) + 1) - self.config.bin_range
       reward_loss = -get_bin_log_prob(predictions.reward_dist_logit, bins, timestep.reward, use_symlog=True)
-      l_pred += get_loss_mean_with_mask(reward_loss, timestep.valid[..., None])
+      l_pred += get_loss_mean_with_mask(reward_loss, timestep.action_valid[..., None])
 
       #Using free bits to clip dynamics and representation losses
       # to 1, thus disabling their gradient when they are below 1
       #[Trajectory, Batch, encoded_categories, encoded_classes]
+
       posterior = nnx.softmax(predictions.repr_state, axis=-1)
       prior = nnx.softmax(predictions.dynamics_state, axis=-1)
+      #TODO: Use state_valid or action_valid here?
       #[Trajectory, Batch]
       dynamics_loss = jnp.maximum(1, kl_divergence(jax.lax.stop_gradient(posterior), prior))
-      l_dyn += get_loss_mean_with_mask(dynamics_loss, timestep.valid)
+      l_dyn += get_loss_mean_with_mask(dynamics_loss, timestep.state_valid)
       #[Trajectory, Batch]
       repr_loss = jnp.maximum(1, kl_divergence(posterior, jax.lax.stop_gradient(prior)))
-      l_rep += get_loss_mean_with_mask(repr_loss, timestep.valid)
+      l_rep += get_loss_mean_with_mask(repr_loss, timestep.state_valid)
 
 
       return self.config.beta_prediction * l_pred + self.config.beta_dynamics * l_dyn + self.config.beta_representation * l_rep
