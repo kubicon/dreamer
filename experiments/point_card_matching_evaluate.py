@@ -24,12 +24,18 @@ def model_walk_test_deterministic(model:Dreamer, seed:int, eps:float = 1e-3):
     legals = np.asarray(legals)
     stoch_state = jax.nn.softmax(stoch_state, axis=-1)
     max_probs = jnp.max(stoch_state, axis=-1)
+    max_indices = jnp.argmax(stoch_state, axis=-1)
+    max_deter_state = jax.nn.one_hot(max_indices, stoch_state.shape[-1], axis=-1)
     if jnp.max(jnp.abs(1 - max_probs)) >= eps:
       print(f"In state {state}, stoch state differs from deterministic by more than {eps}")
       print(f"Stoch state max probs {max_probs}")
+      real_obs = model.game.get_info(state)[1]
+      represented_stoch = jax.nn.softmax(model.optimizers.encoder_optimizer.model(hidden_state, real_obs), axis=-1)
+      repr_max_probs = jnp.max(represented_stoch, axis=-1)
+      print(f"Represented (posterior) stochastic state max probs {repr_max_probs}")
+      reward, terminal = model.get_reward_and_terminal(model.optimizers.predictor_optimizer.model,hidden_state, max_deter_state)
+      print(f"Predicted reward {reward} predicted terminal {terminal}")
     
-    max_indices = jnp.argmax(stoch_state, axis=-1)
-    max_deter_state = jax.nn.one_hot(max_indices, stoch_state.shape[-1], axis=-1)
     pi = np.asarray(get_reference_policy(state, legals))
     for ai, a in enumerate(pi):
       if a < eps:
@@ -65,6 +71,7 @@ def main():
   model = load_model(model_path)
   assert isinstance(model, Dreamer), "Loaded model is not an instance of Dreamer."
   assert model.game.game_name() in ["point_card_matching", "point_card_matching_stochastic"], f"Loaded model should be trained some point card matching game not {model.game.game_name()}"
+  print(f"Restored model from {model_path}")
   model_walk_test_deterministic(model, seed)
 
 if __name__ == "__main__":

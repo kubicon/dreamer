@@ -7,7 +7,7 @@ import orbax.checkpoint as ocp
 from functools import partial
 
 
-from train_utils import DreamerConfig, get_reference_policy, TimeStep, get_loss_mean_with_mask, PredictionStep
+from train_utils import DreamerConfig, get_reference_policy, TimeStep, get_loss_mean_with_mask, PredictionStep, symexp
 from distributions import get_normal_log_prob, get_bin_log_prob, kl_divergence, sample_categorical
 from networks import initialize_dreamer_optimizers, DreamerOptimizers, SequenceModel, Encoder, Decoder, DynamicsPredictor, Predictor
 from games.jax_game import JaxGame, GameState
@@ -133,7 +133,7 @@ class Dreamer():
       next_game_state, terminal, next_rewards, next_legal = self.game.apply_action(carry.game_state, action_key, turn, action)
       #Action in terminal state is not valid
       action_valid = (jnp.ones_like(next_rewards, dtype=int) - carry.terminal).astype(bool)
-      state_valid = (jnp.ones_like(next_rewards, dtype=int) - carry.valid).astype(bool)
+      state_valid = (jnp.zeros_like(next_rewards, dtype=int) + carry.valid).astype(bool)
       terminal = jnp.where(action_valid, terminal, True)
       #We need state tensor to be defined in terminal state as well
       next_rewards = jnp.where(action_valid, next_rewards, jnp.zeros_like(next_rewards))
@@ -207,7 +207,7 @@ class Dreamer():
       next_game_state, terminal, next_rewards, next_legal = self.game.apply_action(carry.game_state, action_key, turn, action)
       #Action in terminal state is not valid
       action_valid = (jnp.ones_like(next_rewards, dtype=int) - carry.terminal).astype(bool)
-      state_valid = (jnp.ones_like(next_rewards, dtype=int) - carry.valid).astype(bool)
+      state_valid = (jnp.zeros_like(next_rewards, dtype=int) + carry.valid).astype(bool)
       terminal = jnp.where(action_valid, terminal, True)
       #We need state tensor to be defined in terminal state as well
       next_rewards = jnp.where(action_valid, next_rewards, jnp.zeros_like(next_rewards))
@@ -272,7 +272,7 @@ class Dreamer():
       reconstruction_loss = -get_normal_log_prob(predictions.decoded_obs, timestep.obs, use_symlog=True)
       l_pred += get_loss_mean_with_mask(reconstruction_loss, timestep.state_valid[..., None])
       #[Trajectory, Batch, 1]
-      continuation_loss = -get_normal_log_prob(predictions.done_logit, timestep.terminal.astype(int))
+      continuation_loss = -get_normal_log_prob(predictions.done_logit, timestep.terminal.astype(jnp.int16))
       l_pred += get_loss_mean_with_mask(continuation_loss, timestep.action_valid[..., None])
       #[Trajectory, Batch, 2* bin_range + 1]
       bins = jnp.arange((2 * self.config.bin_range) + 1) - self.config.bin_range
@@ -292,6 +292,7 @@ class Dreamer():
       #[Trajectory, Batch]
       repr_loss = jnp.maximum(1, kl_divergence(posterior, jax.lax.stop_gradient(prior)))
       l_rep += get_loss_mean_with_mask(repr_loss, timestep.state_valid)
+      #jax.debug.breakpoint()
 
 
       return self.config.beta_prediction * l_pred + self.config.beta_dynamics * l_dyn + self.config.beta_representation * l_rep
@@ -305,6 +306,7 @@ class Dreamer():
     optimizers.predictor_optimizer.update(grad[4])
     
     return loss
+  
   
   # Unlike flax.linen, nnx.jit allows updating the model itself.
   @partial(nnx.jit, static_argnums=(0))
@@ -344,5 +346,19 @@ class Dreamer():
     self.jax_rngs = state["jax_rngs"]
     self.nnx_rngs = update_nnx(self.nnx_rngs, state["nnx_rngs"])
     self.optimizers = update_nnx(self.optimizers, state["optimizers"])
+
+  @partial(nnx.jit, static_argnums=(0, 4))
+  def get_reward_and_terminal(self, predictor_model: Predictor, hidden_state: chex.Array, deterministic_state:chex.Array, terminal_threshold: float = 0.5):
+    """Calls the predictor network and 
+    passes the reward and done logits through
+    appropriate transformations to return the actual values"""
+    #[2* bin_range + 1], [1]
+    reward_bin_logits, done_logit = predictor_model(hidden_state, deterministic_state)
+    bins = jnp.arange((2 * self.config.bin_range) + 1) - self.config.bin_range
+    reward_untransformed = jnp.sum(bins * nnx.softmax(reward_bin_logits))
+    reward = symexp(reward_untransformed)
+    done_prob = nnx.sigmoid(done_logit)
+    terminal = done_prob >= terminal_threshold
+    return reward, terminal
     
     
