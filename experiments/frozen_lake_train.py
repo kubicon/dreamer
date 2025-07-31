@@ -86,13 +86,7 @@ def main():
       config=config,
       game = fl_game, 
   )
-  for i in range(args.num_steps):
-    loss = model.world_model_train_step()
-    if args.print_each > 0 and i % args.print_each == 0:
-      print(f"Step {i}, Loss: {loss}")
-    if args.save_each > 0 and i % args.save_each == 0:
-      model_file = model_save_dir + f"step_{i}.pkl"
-      save_model(model, model_file)
+  model.train_world_model(model_save_dir, args.num_steps, args.print_each, args.save_each)
 
 if __name__ == "__main__":
   main()

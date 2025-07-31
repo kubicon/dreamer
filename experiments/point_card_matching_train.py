@@ -4,7 +4,7 @@ from dreamer import Dreamer, DreamerConfig
 import os
 
 from games.point_card_matching import PointCardMatching, PointCardMatchingStochastic
-from train_utils import save_model
+#from pyinstrument import Profiler
 
 
 parser = ArgumentParser()
@@ -42,6 +42,7 @@ parser.add_argument("--print_each", type=int, default=100, help="Print loss ever
 parser.add_argument("--model_save_dir", type=str, default="", help="Directory to save the trained model")
 
 def main():
+  #profiler = Profiler()
   args = parser.parse_args()
   network_seed = args.network_seed
   trajectory_seed = args.trajectory_seed
@@ -87,13 +88,10 @@ def main():
       config=config,
       game = pcm_game,
   )
-  for i in range(args.num_steps):
-    loss = model.world_model_train_step()
-    if args.print_each > 0 and i % args.print_each == 0:
-      print(f"Step {i}, Loss: {loss}")
-    if args.save_each > 0 and i % args.save_each == 0:
-      model_file = model_save_dir + f"step_{i}.pkl"
-      save_model(model, model_file)
+  #profiler.start()
+  model.train_world_model(model_save_dir, args.num_steps, args.print_each, args.save_each)
+  #profiler.stop()
+  #print(profiler.output_text(unicode=True, color=True))
 
 if __name__ == "__main__":
   main()

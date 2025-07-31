@@ -1,13 +1,12 @@
 import chex
-import os
 import jax
 import jax.numpy as jnp
 from flax import nnx
-import orbax.checkpoint as ocp
+import optax
 from functools import partial
 
 
-from train_utils import DreamerConfig, get_reference_policy, TimeStep, get_loss_mean_with_mask, PredictionStep, symexp
+from train_utils import DreamerConfig, get_reference_policy, TimeStep, get_loss_mean_with_mask, PredictionStep, symexp, save_model, _jit_generate_key
 from distributions import get_normal_log_prob, get_bin_log_prob, kl_divergence, sample_categorical
 from networks import initialize_dreamer_optimizers, DreamerOptimizers, SequenceModel, Encoder, Decoder, DynamicsPredictor, Predictor
 from games.jax_game import JaxGame, GameState
@@ -121,7 +120,7 @@ class Dreamer():
     def _sample_trajectory(carry: SampleTrajectoryCarry, xs) -> tuple[SampleTrajectoryCarry, chex.Array]:
       (key, turn) = xs
       
-      state, obs = self.game.get_info(game_state)
+      state, obs = self.game.get_info(carry.game_state)
       
       sample_key, action_key = jax.random.split(key)
 
@@ -193,7 +192,7 @@ class Dreamer():
     
     def _sample_trajectory(carry: SampleTrajectoryCarry, xs) -> tuple[SampleTrajectoryCarry, chex.Array]:
       (key, turn) = xs
-      state, p1_iset, p2_iset, public_state = self.game.get_info(game_state)
+      state, p1_iset, p2_iset, public_state = self.game.get_info(carry.game_state)
       obs = jnp.stack((p1_iset, p2_iset), axis=0)
       
       sample_key, action_key = jax.random.split(key)
@@ -249,7 +248,7 @@ class Dreamer():
         action, obs, cur_key = xs
         stochastic_state = encoder(hidden_state, obs)
         deterministic_state = sample_categorical(stochastic_state, cur_key)
-        next_stochastic_state = dynamics_model(hidden_state)
+        prior_stochastic_state = dynamics_model(hidden_state)
         reward, done = predictor(hidden_state, deterministic_state)
         decoded_obs = decoder(hidden_state, deterministic_state)
         gru_input = jnp.concatenate([deterministic_state.reshape(*deterministic_state.shape[:-2], -1), action], axis=-1) 
@@ -258,7 +257,7 @@ class Dreamer():
                                 decoded_obs = decoded_obs,
                                 reward_dist_logit = reward,
                                 done_logit = done,
-                                dynamics_state = next_stochastic_state)
+                                dynamics_state = prior_stochastic_state)
         new_carry = (sequence_model, encoder, decoder, dynamics_model, predictor, new_hidden)
         return new_carry, preds
       
@@ -269,14 +268,17 @@ class Dreamer():
       final_hidden, predictions = vectorized_predict(init_hidden, xs) 
        
       #[Trajectory, Batch, obs_size]
-      reconstruction_loss = -get_normal_log_prob(predictions.decoded_obs, timestep.obs, use_symlog=True)
+      reconstruction_loss = -get_normal_log_prob(predictions.decoded_obs, timestep.obs)
       l_pred += get_loss_mean_with_mask(reconstruction_loss, timestep.state_valid[..., None])
       #[Trajectory, Batch, 1]
-      continuation_loss = -get_normal_log_prob(predictions.done_logit, timestep.terminal.astype(jnp.int16))
+      #continuation_loss = -get_normal_log_prob(predictions.done_logit, timestep.terminal.astype(jnp.int16))
+      continuation_loss = optax.sigmoid_binary_cross_entropy(predictions.done_logit, timestep.terminal)
       l_pred += get_loss_mean_with_mask(continuation_loss, timestep.action_valid[..., None])
       #[Trajectory, Batch, 2* bin_range + 1]
       bins = jnp.arange((2 * self.config.bin_range) + 1) - self.config.bin_range
       reward_loss = -get_bin_log_prob(predictions.reward_dist_logit, bins, timestep.reward, use_symlog=True)
+      #[Trajectory, Batch, 1]
+      #reward_loss = -get_normal_log_prob(timestep.reward, timestep.reward)
       l_pred += get_loss_mean_with_mask(reward_loss, timestep.action_valid[..., None])
 
       #Using free bits to clip dynamics and representation losses
@@ -321,6 +323,19 @@ class Dreamer():
     rng_key = self.generate_key()
     return self.world_model_train(self.optimizers, rng_key)
     # return self.cached_train(rng_key)
+
+  def train_world_model(self, model_save_dir:str, num_steps:int, print_each: int = -1, save_each: int = -1):
+    
+    cached_train_step = nnx.cached_partial(self.world_model_train, self.optimizers)
+    for i in range(num_steps):
+      self.jax_rngs, rng_key = _jit_generate_key(self.jax_rngs)
+      #loss = self.world_model_train(self.optimizers, rng_key)
+      loss = cached_train_step(rng_key)
+      if print_each > 0 and i % print_each == 0:
+        print(f"Step {i}, Loss: {loss}")
+      if save_each > 0 and i % save_each == 0:
+        model_file = model_save_dir + f"step_{i}.pkl"
+        save_model(self, model_file)
    
   def __getstate__(self):
     return {
@@ -356,9 +371,21 @@ class Dreamer():
     reward_bin_logits, done_logit = predictor_model(hidden_state, deterministic_state)
     bins = jnp.arange((2 * self.config.bin_range) + 1) - self.config.bin_range
     reward_untransformed = jnp.sum(bins * nnx.softmax(reward_bin_logits))
+    #reward_untransformed, done_logit = predictor_model(hidden_state, deterministic_state)
     reward = symexp(reward_untransformed)
+    #reward = reward_untransformed
     done_prob = nnx.sigmoid(done_logit)
+    #jax.debug.breakpoint()
     terminal = done_prob >= terminal_threshold
     return reward, terminal
+  
+  @partial(nnx.jit, static_argnums=(0))
+  def get_decoder(self, decoder_model: Decoder, hidden_state: chex.Array, deterministic_state: chex.Array):
+    """Calls the decoeder network and 
+    applies the appropriate transformation to its output"""
+    decoder_output_untransformed = decoder_model(hidden_state, deterministic_state)
+    #decoder_output = symexp(decoder_output_untransformed)
+    decoder_output = decoder_output_untransformed
+    return decoder_output
     
     

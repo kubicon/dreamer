@@ -125,11 +125,15 @@ class Predictor(nnx.Module):
   and return logits of the predicted reward bin_distribution and done flag, ordered as such.
   Pass the done logits through sigmoid and compare against a threshold if you want
   to obtain an actual done flag. The reward are logits of a distribution over the exponentially
-  spaced bins like symexp([-bin_range, bin_range])""" 
+  spaced bins like symexp([-bin_range, bin_range]).
+  TODO: Dreamer assumes reward and continuation flags to be defined 
+  on states not on (state, action, next_state) tuples. This will likely
+  cause issues and make model predict some average over the next actions.""" 
   def __init__(self, hidden_state_size, encoded_classes, encoded_categories, bin_range, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
     self.init_layer = LinNormRelu(hidden_state_size + encoded_classes * encoded_categories, hidden_features, rngs)
     self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
     self.reward_layer = nnx.Linear(hidden_features, (2 * bin_range) + 1, rngs=rngs)
+    #self.reward_layer = nnx.Linear(hidden_features, 1, rngs=rngs)
     self.done_layer = nnx.Linear(hidden_features, 1, rngs=rngs)
     
   def __call__(self, hidden_state: chex.Array, encoded_state: chex.Array):
