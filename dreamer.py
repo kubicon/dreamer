@@ -202,17 +202,17 @@ class Dreamer():
        
       #[Trajectory, Batch, obs_size]
       reconstruction_loss = -get_normal_log_prob(predictions.decoded_obs, timestep.obs)
-      l_pred += get_loss_mean_with_mask(reconstruction_loss, timestep.state_valid[..., None])
+      l_pred += get_loss_mean_with_mask(reconstruction_loss, timestep.valid[..., None])
       #[Trajectory, Batch, 1]
       #continuation_loss = -get_normal_log_prob(predictions.done_logit, timestep.terminal.astype(jnp.int16))
-      continuation_loss = optax.sigmoid_binary_cross_entropy(predictions.done_logit, timestep.terminal)
-      l_pred += get_loss_mean_with_mask(continuation_loss, timestep.action_valid[..., None])
+      continuation_loss = optax.sigmoid_binary_cross_entropy(predictions.done_logit, timestep.terminal[..., None])
+      l_pred += get_loss_mean_with_mask(continuation_loss, timestep.valid[..., None])
       #[Trajectory, Batch, 2* bin_range + 1]
       bins = jnp.arange((2 * self.config.bin_range) + 1) - self.config.bin_range
       reward_loss = -get_bin_log_prob(predictions.reward_dist_logit, bins, timestep.reward, use_symlog=True)
       #[Trajectory, Batch, 1]
       #reward_loss = -get_normal_log_prob(timestep.reward, timestep.reward)
-      l_pred += get_loss_mean_with_mask(reward_loss, timestep.action_valid[..., None])
+      l_pred += get_loss_mean_with_mask(reward_loss, timestep.valid[..., None])
 
       #Using free bits to clip dynamics and representation losses
       # to 1, thus disabling their gradient when they are below 1
@@ -223,10 +223,11 @@ class Dreamer():
       #TODO: Use state_valid or action_valid here?
       #[Trajectory, Batch]
       dynamics_loss = jnp.maximum(1, kl_divergence(jax.lax.stop_gradient(posterior), prior))
-      l_dyn += get_loss_mean_with_mask(dynamics_loss, timestep.state_valid)
+      dynamics_mask = jnp.logical_and(timestep.valid, jnp.logical_not(timestep.terminal))
+      l_dyn += get_loss_mean_with_mask(dynamics_loss, dynamics_mask)
       #[Trajectory, Batch]
       repr_loss = jnp.maximum(1, kl_divergence(posterior, jax.lax.stop_gradient(prior)))
-      l_rep += get_loss_mean_with_mask(repr_loss, timestep.state_valid)
+      l_rep += get_loss_mean_with_mask(repr_loss, dynamics_mask)
       #jax.debug.breakpoint()
 
 
