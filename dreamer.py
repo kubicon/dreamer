@@ -36,9 +36,8 @@ class Dreamer():
     self.trajectory_max = self.game.max_trajectory_length() + 1 # TODO: Change the environments so they reflect this. This + 1 is a stupid hack.
 
     self.action_dimension = self.game.num_distinct_actions()
-    self.is_multi_agent = self.game.num_players() > 1
-    self.sample_trajectory_func = self.sample_trajectory if self.is_multi_agent else self.sample_trajectory_single_agent
-
+    self.is_multi_agent = self.game.num_players() > 1 
+    
     self._get_example_timestep()
     self.cached_train = nnx.cached_partial(self.world_model_train, self.optimizers)
     
@@ -177,9 +176,9 @@ class Dreamer():
     def world_model_loss(sequence_model: SequenceModel, encoder: Encoder, decoder: Decoder, dynamics_model: DynamicsPredictor, predictor: Predictor):
       l_pred, l_dyn, l_rep = 0, 0, 0
       #[Trajectory, Batch, ...]
-      @nnx.scan(in_axes=(nnx.Carry, 0), out_axes=(nnx.Carry, 0))
-      def _predict_over_timestep(carry, xs):
-        sequence_model, encoder, decoder, dynamics_model, predictor, hidden_state = carry
+      @nnx.scan(in_axes=(nnx.Carry, 0, None, None, None, None, None), out_axes=(nnx.Carry, 0))
+      def _predict_over_timestep(hidden_state, xs, sequence_model, encoder, decoder, dynamics_model, predictor):
+        
         action, obs, cur_key = xs
         stochastic_state = encoder(hidden_state, obs)
         deterministic_state = sample_categorical(stochastic_state, cur_key)
@@ -192,15 +191,14 @@ class Dreamer():
                                 decoded_obs = decoded_obs,
                                 reward_dist_logit = reward,
                                 done_logit = done,
-                                dynamics_state = prior_stochastic_state)
-        new_carry = (sequence_model, encoder, decoder, dynamics_model, predictor, new_hidden)
-        return new_carry, preds
+                                dynamics_state = prior_stochastic_state) 
+        
+        return new_hidden, preds
       
       xs = (timestep.action, timestep.obs, sample_keys)
-      init_carry = jnp.zeros((self.config.batch_size, self.config.hidden_state_size)) 
-      init_hidden = (sequence_model, encoder, decoder, dynamics_model, predictor, init_carry)
-      vectorized_predict = nnx.vmap(_predict_over_timestep, in_axes=((None, None, None, None, None, 0), (1, 1, 1)), out_axes=((None, None, None, None, None, 0), 1))
-      final_hidden, predictions = vectorized_predict(init_hidden, xs) 
+      init_hidden = jnp.zeros((self.config.batch_size, self.config.hidden_state_size)) 
+      vectorized_predict = nnx.vmap(_predict_over_timestep, in_axes=(0, 1, None, None, None, None, None), out_axes=(0, 1))
+      _, predictions = vectorized_predict(init_hidden, xs, sequence_model, encoder, decoder, dynamics_model, predictor) 
        
       #[Trajectory, Batch, obs_size]
       reconstruction_loss = -get_normal_log_prob(predictions.decoded_obs, timestep.obs)
