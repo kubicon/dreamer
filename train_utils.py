@@ -33,15 +33,15 @@ class PredictionStep():
 @chex.dataclass(frozen=True)
 class TimeStep():
   
-  valid: chex.Array = () # [...,]
   obs: chex.Array = () # [..., Player, iset_dim] for multi agent or [..., obs_dim] for single_agent
   legal: chex.Array = () # [..., Player, A] for multi agent or [..., A] for single_agent
   
   action: chex.Array = () # [..., Player, A] for multi agent or [..., A] for single agent
   policy: chex.Array = () # [..., Player, A] for multi agent or [..., A] for single agent
   
-  reward: chex.Array = () # [...,] Reward after playing an action
-  terminal: chex.Array = () #[..., 1] Whether state after playing an action was terminal
+  reward: chex.Array = () # [...] Reward after playing an action
+  valid: chex.Array = () # [...] Flag determining, whether we should train in this state
+  terminal: chex.Array = () #[...] Whether state after playing an action was terminal
 
 
 

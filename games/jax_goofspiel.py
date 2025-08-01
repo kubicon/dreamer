@@ -40,6 +40,10 @@ class JaxGoofspiel(JaxGame):
   def information_state_tensor_shape(self):
     return self.max_turns * self.cards + self.max_turns * 2 + self.max_turns * self.cards * 2 + 2
   
+  # TODO: Change this
+  def observation_tensor_shape(self):
+    return self.information_state_tensor_shape()
+  
   def public_state_tensor_shape(self):
     return self.max_turns * self.cards + self.max_turns * 2 + self.max_turns * self.cards
   

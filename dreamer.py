@@ -6,18 +6,12 @@ import optax
 from functools import partial
 
 
-from train_utils import DreamerConfig, get_reference_policy, TimeStep, get_loss_mean_with_mask, PredictionStep, symexp, save_model, _jit_generate_key
+from train_utils import DreamerConfig, get_reference_policy, TimeStep, get_loss_mean_with_mask, PredictionStep, symexp, save_model
 from distributions import get_normal_log_prob, get_bin_log_prob, kl_divergence, sample_categorical
 from networks import initialize_dreamer_optimizers, DreamerOptimizers, SequenceModel, Encoder, Decoder, DynamicsPredictor, Predictor
 from games.jax_game import JaxGame, GameState
 
 
-@chex.dataclass(frozen=True)
-class SampleTrajectoryCarry:
-  game_state: GameState
-  terminal: bool
-  legal_actions: chex.Array
-  valid: bool
 
 
 class Dreamer():
@@ -39,7 +33,7 @@ class Dreamer():
 
     #We want + 1. since we want the terminal state as well
     # as representation should be also trained on those
-    self.trajectory_max = self.game.max_trajectory_length() + 1
+    self.trajectory_max = self.game.max_trajectory_length() + 3
 
     self.action_dimension = self.game.num_distinct_actions()
     self.is_multi_agent = self.game.num_players() > 1
@@ -53,25 +47,22 @@ class Dreamer():
     dummy_key = jax.random.key(0)
     example_state, example_legals = self.game.initialize_structures(dummy_key)
     if self.is_multi_agent:
-      ex_state_tensor, ex_p1_iset, ex_p2_iset, ex_public_state = self.game.get_info(example_state)
+      _, ex_p1_iset, ex_p2_iset, _ = self.game.get_info(example_state)
       ex_obs = jnp.stack([ex_p1_iset, ex_p2_iset], axis=0)
     else:
-      ex_state_tensor, ex_obs = self.game.get_info(example_state)
-    valid = jnp.zeros(1, dtype=bool)
+      _, ex_obs = self.game.get_info(example_state)
     legal = jnp.ones_like(example_legals)
     #the squeeze on axis 0 is for correct shape in a single agent environment
-    action = jnp.squeeze(jnp.tile(nnx.one_hot(0, legal.shape[-1]), (self.game.num_players(), 1)), axis=0)
+    action = jax.nn.one_hot(jnp.argmax(legal, -1), legal.shape[-1]) 
     policy = legal.astype(float) / jnp.sum(legal, axis=-1, keepdims=True)
-    reward = jnp.zeros(1, dtype=float)
-    terminal = jnp.zeros(1, dtype=bool)
-    self.example_timestep = TimeStep(action_valid = valid,
-                                    state_valid = valid,
+    self.example_timestep = TimeStep(
                                     obs= ex_obs,
                                     action=action,
                                     legal=legal,
                                     policy = policy,
-                                    reward = reward,
-                                    terminal = terminal)
+                                    reward = 0.0,
+                                    terminal = False,
+                                    valid = False)
   
   def generate_key(self):
     self.jax_rngs, key = jax.random.split(self.jax_rngs)
@@ -86,114 +77,53 @@ class Dreamer():
   @partial(nnx.jit, static_argnums=(0, 1))
   def sample_trajectories(self,  batch_size, key):
     keys = jax.random.split(key, batch_size)
-    return nnx.vmap(self.sample_trajectory_func, in_axes=0, out_axes=1)(keys)
+    return nnx.vmap(self.sample_trajectory, in_axes=0, out_axes=1)(keys)
   
 
-  @partial(jax.jit, static_argnums=0)
-  def sample_trajectory_single_agent(self, key) ->TimeStep:
-    """Samples trajectories from the game for 
-    game.max_trajectory_lenght turns (using valid to
-    mask out invalid states that appear when playing post terminal).
-    This is the single agent version."""
-    # TODO: Can we find some common interface so we do not repeat most of the stuff twice.
-    init_key, trajectory_key, = jax.random.split(key)
-    trajectory_key = jax.random.split(trajectory_key, self.trajectory_max)
-    
-
-    actions = self.action_dimension
-          
-    game_state, legal_actions = self.game.initialize_structures(init_key)
-    init_carry = SampleTrajectoryCarry(
-      game_state = game_state,
-      terminal = False,
-      valid = True,
-      legal_actions = legal_actions
-    )
-    
-    @jax.jit
-    def choice_wrapper(key, p):
-      action = jax.random.choice(key, actions, p=p)
-      action_oh = jax.nn.one_hot(action, actions)
-      return action, action_oh
-    
-    
-    def _sample_trajectory(carry: SampleTrajectoryCarry, xs) -> tuple[SampleTrajectoryCarry, chex.Array]:
-      (key, turn) = xs
-      
-      state, obs = self.game.get_info(carry.game_state)
-      
-      sample_key, action_key = jax.random.split(key)
-
-      #For now we just use some very simple sampling policy
-      # TODO: Change this to some better policy
-      pi = get_reference_policy(carry.game_state, carry.legal_actions)
-      # For each player samples a single action
-      action, action_oh = choice_wrapper(key, pi)
-      next_game_state, terminal, next_rewards, next_legal = self.game.apply_action(carry.game_state, action_key, turn, action)
-      #Action in terminal state is not valid
-      action_valid = (jnp.ones_like(next_rewards, dtype=int) - carry.terminal).astype(bool)
-      state_valid = (jnp.zeros_like(next_rewards, dtype=int) + carry.valid).astype(bool)
-      terminal = jnp.where(action_valid, terminal, True)
-      #We need state tensor to be defined in terminal state as well
-      next_rewards = jnp.where(action_valid, next_rewards, jnp.zeros_like(next_rewards))
-      obs = jnp.where(state_valid, obs, self.example_timestep.obs)   
-      new_carry = SampleTrajectoryCarry(
-        game_state = next_game_state,
-        terminal = terminal,
-        valid = action_valid,
-        legal_actions=jnp.where(terminal, self.example_timestep.legal, next_legal)
-      )
-      timestep = TimeStep(
-        action_valid = action_valid,
-        state_valid = state_valid,
-        obs = obs,
-        legal = carry.legal_actions,
-        action = action_oh,
-        policy = pi,
-        terminal = terminal[..., None],
-        reward = next_rewards[..., None]
-      )
-      return new_carry, timestep
-    _, timestep = jax.lax.scan(_sample_trajectory,
-             init=init_carry,
-             xs=(trajectory_key, jnp.arange(self.trajectory_max)))
-    #[Trajectory, ...]
-    return timestep
-  
-  @partial(jax.jit, static_argnums=0)
+  @partial(nnx.jit, static_argnums=0)
   def sample_trajectory(self, key) ->TimeStep:
-    """Samples trajectories from the game for 
-    game.max_trajectory_lenght turns (using valid to
-    mask out invalid states that appear when playing post terminal).
-    This is the multi agent version."""
     init_key, trajectory_key, = jax.random.split(key)
     trajectory_key = jax.random.split(trajectory_key, self.trajectory_max)
-    
-
+  
     actions = self.action_dimension
-          
+    
     game_state, legal_actions = self.game.initialize_structures(init_key)
+    
+    @chex.dataclass(frozen=True)
+    class SampleTrajectoryCarry:
+      game_state: GameState
+      legal_actions: chex.Array
+      reward: chex.Array
+      terminal: bool
+      valid: bool
+      
     init_carry = SampleTrajectoryCarry(
       game_state = game_state,
-      terminal = False,
-      valid = True,
-      legal_actions = legal_actions
+      legal_actions = legal_actions,
+      reward = jnp.array(0),
+      terminal = jnp.array(False),
+      valid = jnp.array(True)
     )
     
-    @jax.jit
+    
+    @nnx.jit
     def choice_wrapper(key, p):
       action = jax.random.choice(key, actions, p=p)
       action_oh = jax.nn.one_hot(action, actions)
       return action, action_oh
 
     
-    vectorized_sample_action = jax.vmap(choice_wrapper, in_axes=(0, 0), out_axes=0)
+    vectorized_sample_action = nnx.vmap(choice_wrapper, in_axes=(0, 0), out_axes=0)
 
-    
+    @nnx.scan(in_axes = (nnx.Carry, 0), out_axes=(nnx.Carry, 0))
     def _sample_trajectory(carry: SampleTrajectoryCarry, xs) -> tuple[SampleTrajectoryCarry, chex.Array]:
       (key, turn) = xs
-      state, p1_iset, p2_iset, public_state = self.game.get_info(carry.game_state)
-      obs = jnp.stack((p1_iset, p2_iset), axis=0)
+      
+      if self.is_multi_agent:
+        state, p1_iset, p2_iset, public_state = self.game.get_info(carry.game_state)
+        obs = jnp.stack((p1_iset, p2_iset), axis=0)
+      else:
+        state, obs = self.game.get_info(carry.game_state)
       
       sample_key, action_key = jax.random.split(key)
 
@@ -201,36 +131,41 @@ class Dreamer():
       # TODO: Change this to some better policy
       pi = get_reference_policy(carry.game_state, carry.legal_actions)
       # For each player samples a single action
-      sample_key = jax.random.split(sample_key, 2)
-      action, action_oh = vectorized_sample_action(sample_key, pi)
-      next_game_state, terminal, next_rewards, next_legal = self.game.apply_action(carry.game_state, action_key, turn, action)
-      #Action in terminal state is not valid
-      action_valid = (jnp.ones_like(next_rewards, dtype=int) - carry.terminal).astype(bool)
-      state_valid = (jnp.zeros_like(next_rewards, dtype=int) + carry.valid).astype(bool)
-      terminal = jnp.where(action_valid, terminal, True)
-      #We need state tensor to be defined in terminal state as well
-      next_rewards = jnp.where(action_valid, next_rewards, jnp.zeros_like(next_rewards))
-      obs = jnp.where(state_valid, obs, self.example_timestep.obs)   
-      new_carry = SampleTrajectoryCarry(
-        game_state = next_game_state,
-        terminal = terminal,
-        valid = action_valid,
-        legal_actions=jnp.where(terminal, self.example_timestep.legal, next_legal)
-      )
+      
+      if self.is_multi_agent:
+        sample_key = jax.random.split(sample_key, self.game.num_players())
+        action, action_oh = vectorized_sample_action(sample_key, pi)
+      else:
+        action, action_oh = choice_wrapper(sample_key, pi)
+      
       timestep = TimeStep(
-        action_valid = action_valid,
-        state_valid = state_valid,
         obs = obs,
         legal = carry.legal_actions,
         action = action_oh,
         policy = pi,
-        terminal = terminal[..., None],
-        reward = next_rewards
+        reward = carry.reward,
+        valid = carry.valid,
+        terminal = carry.terminal
       )
+      
+      
+      next_game_state, next_terminal, next_rewards, next_legal = self.game.apply_action(carry.game_state, action_key, turn, action)
+      #Action in terminal state is not valid
+      next_terminal = jnp.logical_or(carry.terminal, next_terminal)
+      next_valid = jnp.logical_not(carry.terminal)   
+      new_carry = SampleTrajectoryCarry(
+        game_state = next_game_state,
+        legal_actions=jnp.where(next_terminal, self.example_timestep.legal, next_legal),
+        reward = next_rewards,
+        terminal = next_terminal,
+        valid = next_valid
+      )
+        
+      
+      timestep = jax.tree.map(lambda t, f: jnp.where(carry.valid, t, f), timestep, self.example_timestep)
+      
       return new_carry, timestep
-    _, timestep = jax.lax.scan(_sample_trajectory,
-             init=init_carry,
-             xs=(trajectory_key, jnp.arange(self.trajectory_max)))
+    _, timestep = _sample_trajectory(init_carry, (trajectory_key, jnp.arange(self.trajectory_max)))
     #[Trajectory, ...]
     return timestep
   
@@ -321,16 +256,14 @@ class Dreamer():
 
   def world_model_train_step(self):
     rng_key = self.generate_key()
-    return self.world_model_train(self.optimizers, rng_key)
-    # return self.cached_train(rng_key)
+    # return self.world_model_train(self.optimizers, rng_key)
+    return self.cached_train(rng_key)
 
   def train_world_model(self, model_save_dir:str, num_steps:int, print_each: int = -1, save_each: int = -1):
-    
-    cached_train_step = nnx.cached_partial(self.world_model_train, self.optimizers)
+     
     for i in range(num_steps):
-      self.jax_rngs, rng_key = _jit_generate_key(self.jax_rngs)
-      #loss = self.world_model_train(self.optimizers, rng_key)
-      loss = cached_train_step(rng_key)
+      rng_key = self.generate_key() 
+      loss = self.cached_train(rng_key)
       if print_each > 0 and i % print_each == 0:
         print(f"Step {i}, Loss: {loss}")
       if save_each > 0 and i % save_each == 0:
