@@ -33,7 +33,7 @@ class Dreamer():
 
     #We want + 1. since we want the terminal state as well
     # as representation should be also trained on those
-    self.trajectory_max = self.game.max_trajectory_length() + 3
+    self.trajectory_max = self.game.max_trajectory_length() + 1 # TODO: Change the environments so they reflect this. This + 1 is a stupid hack.
 
     self.action_dimension = self.game.num_distinct_actions()
     self.is_multi_agent = self.game.num_players() > 1
