@@ -34,6 +34,8 @@ parser.add_argument("--bin_range", type=int, default=20, help="Number of the exp
 # Game parameters
 parser.add_argument("--num_cards", type=int, default=3, help="Number of cards of the game. Should be at least 3")
 parser.add_argument("--stochastic", type=bool, default=False, help="Whether to use the point card matching with chance node, or the one without.")
+parser.add_argument("--chance_turn_before_terminal", type=int, default=1, help="How many turns before terminal does the chance turn happen. Only for stochastic point card matching.")
+
 
 # Training parameters
 parser.add_argument("--num_steps", type=int, default=1001, help="Number of training steps")
@@ -75,7 +77,7 @@ def main():
       learning_rate = args.learning_rate,
       rng_seed = args.network_seed
   )
-  pcm_game = PointCardMatchingStochastic(args.num_cards) if args.stochastic else PointCardMatching(args.num_cards)
+  pcm_game = PointCardMatchingStochastic(args.num_cards, chance_turn_before_terminal=args.chance_turn_before_terminal) if args.stochastic else PointCardMatching(args.num_cards)
   model_save_dir = args.model_save_dir
   game_name = pcm_game.game_name()
   empty = ""
