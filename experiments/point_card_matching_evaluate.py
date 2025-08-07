@@ -9,6 +9,8 @@ from dreamer import Dreamer
 from games.point_card_matching import PointCardMatching, PointCardMatchingStochastic
 from train_utils import load_model, get_reference_policy
 
+from itertools import product
+
 parser = ArgumentParser()
 parser.add_argument("--model_dir", type=str, default="trained_networks/point_card_matching_3/seed99/network_seed42", help="Path to the directory of saved models")
 parser.add_argument("--restore_step", type=int, default=1000, help="Saved step of the model to restore")
@@ -83,22 +85,28 @@ def check_outcomes(stoch_state: jax.Array, is_chance:bool, num_chance_outcomes:i
   #FROM HERE ON I THINK IT ONLY WORKS FOR SINGLE CATEGORICAL
   chance_max_probs, chance_max_indices = jax.lax.top_k(stoch_state, num_chance_outcomes)
   chance_probs =  1 / num_chance_outcomes
+  #Find the categorical that is closest to the uniform distribution
+  uniform_distance = jnp.sum((chance_max_probs - chance_probs) ** 2, axis=-1)
+  chance_dist_idx = jnp.argmin(uniform_distance)
+  uniform_categorical = chance_max_probs[chance_dist_idx, :]
+  uniform_categorical_indices = chance_max_indices[chance_dist_idx, :]
   #repr_two_max_probs, _ = jax.lax.top_k(repr_stoch_state, 2)
   if is_chance:
-    if jnp.max(jnp.abs(chance_probs - chance_max_probs)) >= eps:
+    if jnp.max(jnp.abs(chance_probs - uniform_categorical)) >= eps:
       print(f"Stochastic state differs from a stochastic uniform by more than {eps}")
-      print(f"Stochastic state two_max_probs {chance_max_probs}")
+      print(f"Stochastic state  max probs {uniform_categorical}")
       #print(f"Represented (posterior) stochastic state two max probs {repr_two_max_probs}")
   else:
     if jnp.max(jnp.abs(1 - max_probs)) >= eps:
       print(f"Stochastic state differs from deterministic more than {eps}")
       print(f"Stochastic state max probs {max_probs}")
       #print(f"Represented (posterior) stochastic state max probs {repr_max_probs}")
-  #TODO: This only works for a single categorical for now
 
-  chance_max_dets = jax.nn.one_hot(chance_max_indices, stoch_state.shape[-1], axis=-1)
-  next_deters = [det for det in chance_max_dets[0]] if is_chance else jax.nn.one_hot(max_indices, stoch_state.shape[-1], axis=-1)
-  jax.debug.breakpoint()
+  chance_max_dets = jax.nn.one_hot(uniform_categorical_indices, stoch_state.shape[-1], axis=-1)
+  deter_state = jax.nn.one_hot(max_indices, stoch_state.shape[-1], axis=-1)
+  def _make_det_from_chance(chance_det, chance_idx, argmax_state):
+    return jnp.concatenate([argmax_state[:chance_idx, :], chance_det[None, ...], argmax_state[chance_idx + 1:, :]], axis=0)
+  next_deters = [_make_det_from_chance(det, chance_dist_idx, deter_state) for det in chance_max_dets] if is_chance else [deter_state]
   return next_deters
 
 def get_closest_deter(model: Dreamer, next_hidden_state, next_deters, next_state):
@@ -115,21 +123,35 @@ def get_closest_deter(model: Dreamer, next_hidden_state, next_deters, next_state
       closest_deter = next_deter
   return closest_deter
 
-def check_terminal(model: Dreamer, terminal_stoch_state, terminal_hidden_state, terminal_game_state,  eps: float, outcome_threshold: float = 0.1):
-  """Checks for a terminal state whether all the possible outcomes produce valid output.
-  Also assumes only one categorical for now."""
-  terminal_stoch_state = np.asarray(terminal_stoch_state)[0]
+def check_terminal(model: Dreamer, terminal_stoch_state, terminal_hidden_state, terminal_game_state, real_terminal: bool, real_reward: float,  eps: float, outcome_threshold: float = 0.1):
+  """Checks for a terminal state whether all the possible outcomes produce valid output.."""
+  terminal_stoch_state = np.asarray(terminal_stoch_state)
   real_obs = model.game.get_info(terminal_game_state)[1]
   print(f"Checking terminal state {terminal_game_state}")
-  for i, prob in enumerate(terminal_stoch_state):
-    if prob < outcome_threshold:
-      continue
-    sampled_deter = jax.nn.one_hot(i, terminal_stoch_state.shape[-1])
+  #TODO: Could that be done more efficiently without using the itertools product?
+  # And loop over classes?
+  num_classes = terminal_stoch_state.shape[0]
+  terminal_deter_states = (terminal_stoch_state >= outcome_threshold).astype(int)
+  class_indices, category_indices = np.nonzero(terminal_deter_states)
+  per_class_valids = []
+  for i in range(num_classes):
+    single_class_indices = category_indices[class_indices == i]
+    per_class_valids.append(single_class_indices)
+
+  combinations = list(product(*per_class_valids))
+  for comb in combinations:
+    sampled_deter = jax.nn.one_hot(comb, terminal_stoch_state.shape[-1])
     decoded_obs = model.get_decoder(model.optimizers.decoder_optimizer.model, terminal_hidden_state, sampled_deter)
+    probs = [terminal_stoch_state[i, comb_part] for i, comb_part in enumerate(comb)]
+    pred_reward, pred_terminal = model.get_reward_and_terminal(model.optimizers.predictor_optimizer.model, terminal_hidden_state, sampled_deter)
     if jnp.max(jnp.abs(real_obs - decoded_obs)) >= eps:
-      print(f"Real obs and decoded obs differ by more than {eps} for outcome {i} with probability {prob}")
+      print(f"Real obs and decoded obs differ by more than {eps} for outcome {comb} with probabilties {probs}")
       print(f"Real obs {real_obs}")
       print(f"Decoded obs {decoded_obs}")
+    if jnp.abs(real_reward - pred_reward) >= eps:
+      print(f"Predicted reward {pred_reward} differs from real reward {real_reward} for outcome {comb} with probabilties {probs} by more than {eps}")
+    if pred_terminal != real_terminal:
+      print(f"Predicted terminal {pred_terminal} does not match real terminal for outcome {comb} with probabilties {probs} {real_terminal}")
   
 
 def model_walk_test_stochastic(model:Dreamer, seed:int, eps:float = 0.05):
@@ -168,14 +190,14 @@ def model_walk_test_stochastic(model:Dreamer, seed:int, eps:float = 0.05):
       next_hidden = model.optimizers.sequence_optimizer.model(hidden_state, gru_input)
       next_stoch_state = jax.nn.softmax(model.optimizers.dynamics_optimizer.model(next_hidden), axis=-1)
 
-      #represented_next_stoch = model.optimizers.encoder_optimizer.model(next_hidden, real_obs)
+      #represented_next_stoch = jax.nn.softmax(model.optimizers.encoder_optimizer.model(next_hidden, real_obs), axis=-1)
       next_states = model.game.generate_all_chance_outcomes(next_state) if is_chance else [next_state]
       next_deters = check_outcomes(next_stoch_state, is_chance, model.game.chance_outcomes, eps)
      
         
       for next_state in next_states:
         if next_terminal:
-          check_terminal(model, next_stoch_state, next_hidden, next_state, eps=0.3)
+          check_terminal(model, next_stoch_state, next_hidden, next_state, next_terminal, next_reward, eps=0.3)
         closest_deter = get_closest_deter(model, next_hidden, next_deters, next_state)
         _tree_walk(next_state, next_legals, next_hidden, closest_deter, next_reward, next_terminal, key, depth+1)
   

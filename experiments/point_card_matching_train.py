@@ -15,10 +15,13 @@ parser.add_argument("--encoded_classes", type=int, default=32, help="Number of c
 parser.add_argument("--learning_rate", type=float, default=3e-4, help="Learning rate for the optimizer")
 parser.add_argument("--network_seed", type=int, default=-1, help="Random seed for network initialization")
 parser.add_argument("--trajectory_seed", type=int, default=-1, help="Random seed for trajectory generation")
+parser.add_argument("--hidden_state_size", type=int, default =256, help="Size of the RNN hidden state")
+
+## Loss function coefficients
 parser.add_argument("--beta_prediction", type=float, default=1, help="The beta coefficient for the prediction loss")
 parser.add_argument("--beta_dynamics", type=float, default=1, help="The beta coefficient for the dynamics loss")
 parser.add_argument("--beta_representation", type=float, default=0.1, help="The beta coefficient for the representation loss")
-parser.add_argument("--hidden_state_size", type=int, default =256, help="Size of the RNN hidden state")
+parser.add_argument("--free_bits_threshold", type=float, default=1, help="Clipping threshold for the dynamics and representation losses in free bits.")
 
 ##Network layer parameters
 parser.add_argument("--encoder_hidden_size", type=int, default=256, help="Size of the hidden layer in the encoder network")
@@ -62,6 +65,7 @@ def main():
       beta_prediction = args.beta_prediction,
       beta_dynamics = args.beta_dynamics,
       beta_representation = args.beta_representation,
+      free_bits_clip_threshold = args.free_bits_threshold,
       
       hidden_state_size = args.hidden_state_size,
       encoded_classes = args.encoded_classes,

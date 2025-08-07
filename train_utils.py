@@ -63,7 +63,9 @@ class DreamerConfig():
   #Weights of the individual loss terms of the world model
   beta_prediction: float = 1
   beta_dynamics: float = 1
-  beta_representation: float = 0.1 
+  beta_representation: float = 0.1
+
+  free_bits_clip_threshold: float = 1 #Threshold for loss clip in free bits. 
   
   bin_range: int = 20 #Number of the exponentially spaced bins for certain predictions such as reward in one direction, bins will be spaced out as symexp([-bin_range, ..., bin_range])
   

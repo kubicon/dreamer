@@ -222,12 +222,14 @@ class Dreamer():
       prior = nnx.softmax(predictions.dynamics_state, axis=-1)
       #TODO: Use state_valid or action_valid here?
       #[Trajectory, Batch]
-      dynamics_loss = jnp.maximum(1, kl_divergence(jax.lax.stop_gradient(posterior), prior))
-      dynamics_mask = jnp.logical_and(timestep.valid, jnp.logical_not(timestep.terminal))
-      l_dyn += get_loss_mean_with_mask(dynamics_loss, dynamics_mask)
+      dynamics_loss = jnp.maximum(self.config.free_bits_clip_threshold, kl_divergence(jax.lax.stop_gradient(posterior), prior))
+      #dynamics_loss =  kl_divergence(jax.lax.stop_gradient(posterior), prior)
+      #dynamics_mask = jnp.logical_and(timestep.valid, jnp.logical_not(timestep.terminal))
+      l_dyn += get_loss_mean_with_mask(dynamics_loss, timestep.valid)
       #[Trajectory, Batch]
-      repr_loss = jnp.maximum(1, kl_divergence(posterior, jax.lax.stop_gradient(prior)))
-      l_rep += get_loss_mean_with_mask(repr_loss, dynamics_mask)
+      repr_loss = jnp.maximum(self.config.free_bits_clip_threshold, kl_divergence(posterior, jax.lax.stop_gradient(prior)))
+      repr_loss = kl_divergence(posterior, jax.lax.stop_gradient(prior))
+      l_rep += get_loss_mean_with_mask(repr_loss, timestep.valid)
       #jax.debug.breakpoint()
 
 
