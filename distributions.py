@@ -79,8 +79,13 @@ def two_hot_encode(bins: jax.Array, value:jax.Array, use_symlog= True) -> jax.Ar
   weight_start = start_dist / total
   weight_end = end_dist / total
 
-  start_oh = jax.nn.one_hot(int_start_idx, bins.shape[0], axis=-1) * weight_start
-  end_oh = jax.nn.one_hot(int_end_idx, bins.shape[0], axis=-1) * weight_end
+  #Watch out!!! The end weight needs to go to the start and vice-versa.
+  # The reason for that is because rather than the distance, we want the probability
+  # that target belongs to a certain bin. Eg. if the target is 0.8, it is between
+  # bins 0 and 1, with distance 0.8 from the start and 0.2 from end. But
+  # this means that it belongs to bin 0 with pbt 0.2 and bin 1 with pbt 0.8
+  start_oh = jax.nn.one_hot(int_start_idx, bins.shape[0], axis=-1) * weight_end
+  end_oh = jax.nn.one_hot(int_end_idx, bins.shape[0], axis=-1) * weight_start
   
   #[Trajectory, Batch, 2 * bin_range + 1]
   two_hot = jnp.where(equal[..., None], equal_oh, start_oh + end_oh)
