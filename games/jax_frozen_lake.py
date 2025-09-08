@@ -12,9 +12,12 @@ class FrozenLakeGameState(GameState):
     timestep: chex.Array  # current timestep
     gold_collected: chex.Array  # total gold collected
     terminal: chex.Array  # whether game is over
+    turn: chex.Array
 
 
 class FrozenLake(JaxGame):
+  """FIXME: This game uses the old jax game interface. Rework this into the new one
+  with explicitly modelled chance nodes!"""
   def __init__(self, board: jnp.ndarray, init_position: tuple[int, int] = (0, 0), max_timesteps: int = 50, eps: float = 0.1):
     padded_board = jnp.pad(board, ((1, 1), (1, 1)), mode='constant', constant_values=3)  # HxW, where 0 is empty tile, 1 is gold, 2 is hole, 3 is wall
     self.init_board = jax.nn.one_hot(padded_board, 4)

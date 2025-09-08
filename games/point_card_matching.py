@@ -22,6 +22,7 @@ class PointCardMatchingState(GameState):
   points: chex.Array
   point_cards: chex.Array
   terminal: chex.Array
+  turn: int
 
 
 class PointCardMatching(JaxGame):
@@ -40,7 +41,8 @@ class PointCardMatching(JaxGame):
     init_state = PointCardMatchingState(played_cards = init_played_cards,
                                         points = init_points,
                                         point_cards = init_point_cards,
-                                        terminal = jnp.array(False))
+                                        terminal = jnp.array(False),
+                                        turn = 0)
     init_legals = jnp.ones(self.num_cards)
     return init_state, init_legals
   
@@ -82,9 +84,9 @@ class PointCardMatching(JaxGame):
   
 
   @functools.partial(jax.jit, static_argnums=(0))
-  def apply_action(self, state: PointCardMatchingState, key, turn, action):
-    turn_oh = jax.nn.one_hot(turn, self.max_turns)
-    point_card_turn_oh = jax.nn.one_hot(turn + 1, self.max_turns)
+  def apply_action(self, state: PointCardMatchingState, action):
+    turn_oh = jax.nn.one_hot(state.turn, self.max_turns)
+    point_card_turn_oh = jax.nn.one_hot(state.turn + 1, self.max_turns)
     action_oh = jax.nn.one_hot(action, self.num_cards)
 
     new_played_cards = state.played_cards + (action_oh[None, ...] * turn_oh[..., None])
@@ -92,14 +94,14 @@ class PointCardMatching(JaxGame):
     new_legals = jnp.ones(self.num_cards) - already_played
 
     #descending order
-    point_card = self.max_turns - turn - 2
+    point_card = self.max_turns - state.turn - 2
     #Match the action on the PREVIOUS point card
     new_points = state.points + (point_card + 1 == action)
 
     point_card_oh = jax.nn.one_hot(point_card, self.num_cards)
     new_point_cards = state.point_cards + (point_card_oh[None, ...] * point_card_turn_oh[..., None])
 
-    terminal = turn == (self.max_turns - 2)
+    terminal = state.turn == (self.max_turns - 2)
     terminal = state.terminal + terminal
     #new_point_cards = jnp.where(turn ==(self.max_turns - 1), state.point_cards, new_point_cards)
     #checking if we can still match the
@@ -111,7 +113,8 @@ class PointCardMatching(JaxGame):
     new_state = PointCardMatchingState(played_cards=new_played_cards,
                                        point_cards = new_point_cards,
                                        points= new_points,
-                                       terminal = terminal)
+                                       terminal = terminal,
+                                       turn = state.turn + 1)
     return new_state, terminal, reward[0], new_legals
   
 
@@ -119,7 +122,8 @@ class PointCardMatchingStochastic(JaxGame):
   """A point card matching variant with a single
   chance node at the end. Cards are revealed in a descending order,
   except the chance node level, when the revealed card is chosen at random
-  and then the game continues in descending order."""
+  and then the game continues in descending order. FIXME Rework this 
+  into the new jax game interface with explicit chance nodes"""
   def __init__(self, num_cards: int, chance_turn_before_terminal: int = 1):
     """chance_turn_before_terminal specifies how many turns before a terminal
     turn willl the chance node happen. For example when chance_turn_before_terminal == 1,
@@ -136,7 +140,7 @@ class PointCardMatchingStochastic(JaxGame):
 
     self.chance_outcomes = self.num_cards - 1 - self.chance_turn
 
-  def initialize_structures(self, key):
+  def initialize_structures(self):
     init_played_cards = jnp.zeros((self.max_turns, self.num_cards))
     init_points = jnp.zeros(1)
     init_point_cards = jnp.concatenate([jax.nn.one_hot(self.num_cards - 1, self.num_cards)[None, ...], jnp.zeros((self.max_turns - 1, self.num_cards))], axis=0)

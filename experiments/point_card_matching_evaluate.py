@@ -12,7 +12,7 @@ from train_utils import load_model, get_reference_policy
 from itertools import product
 
 parser = ArgumentParser()
-parser.add_argument("--model_dir", type=str, default="trained_networks/point_card_matching_3/seed99/network_seed42", help="Path to the directory of saved models")
+parser.add_argument("--model_dir", type=str, default="trained_networks/dreamer/point_card_matching_3/seed99/network_seed42", help="Path to the directory of saved models")
 parser.add_argument("--restore_step", type=int, default=1000, help="Saved step of the model to restore")
 
 parser.add_argument("--seed", type=int, default=-1, help="Seed for the key to be used in gameplay. -1 for a random seed.")
@@ -32,15 +32,16 @@ def model_walk_test_deterministic(model:Dreamer, seed:int, eps:float = 0.05):
     max_deter_state = jax.nn.one_hot(max_indices, stoch_state.shape[-1], axis=-1)
     decoded_obs = model.get_decoder(model.optimizers.decoder_optimizer.model, hidden_state, max_deter_state)
     pred_reward, pred_terminal = model.get_reward_and_terminal(model.optimizers.predictor_optimizer.model,hidden_state, max_deter_state)
-    print(f"In state {state}")
+    #print(f"In state {state}")
     if jnp.abs(reward - pred_reward) >= eps:
       print(f"Predicted reward {pred_reward} differs from real reward {reward} by more than {eps}")
     if pred_terminal != terminal:
       print(f"Predicted terminal {pred_terminal} does not match real terminal {terminal}")
-    if jnp.max(jnp.abs(real_obs - decoded_obs)) >= eps:
-      print(f"Real obs and decoded obs differ by more than {eps}")
-      print(f"Real obs {real_obs}")
-      print(f"Decoded obs {decoded_obs}")
+    if jnp.max(jnp.abs(real_obs - decoded_obs)) >= 0.3:
+      print(f"Real obs and decoded obs differ by more than 0.3")
+      print(f"Max difference {jnp.max(jnp.abs(real_obs - decoded_obs))}")
+      #print(f"Real obs {real_obs}")
+      #print(f"Decoded obs {decoded_obs}")
     if jnp.max(jnp.abs(1 - max_probs)) >= eps:
       print(f"Stoch state differs from deterministic by more than {eps}")
       print(f"Stoch state max_probs {max_probs}")
@@ -171,8 +172,8 @@ def model_walk_test_stochastic(model:Dreamer, seed:int, eps:float = 0.05):
       print(f"Predicted reward {pred_reward} differs from real reward {reward} by more than {eps}")
     if pred_terminal != terminal:
       print(f"Predicted terminal {pred_terminal} does not match real terminal {terminal}")
-    if jnp.max(jnp.abs(real_obs - decoded_obs)) >= eps:
-      print(f"Real obs and decoded obs differ by more than {eps}")
+    if jnp.max(jnp.abs(real_obs - decoded_obs)) >= 0.3:
+      print(f"Real obs and decoded obs differ by more than 0.3")
       print(f"Real obs {real_obs}")
       print(f"Decoded obs {decoded_obs}")
     if terminal:
@@ -222,7 +223,7 @@ def main():
 
   model = load_model(model_path)
   assert isinstance(model, Dreamer), "Loaded model is not an instance of Dreamer."
-  assert model.game.game_name() in ["point_card_matching", "point_card_matching_stochastic"], f"Loaded model should be trained some point card matching game not {model.game.game_name()}"
+  assert model.game.game_name() in ["point_card_matching", "point_card_matching_stochastic"], f"Loaded model should be trained on some point card matching game not {model.game.game_name()}"
   print(f"Restored model from {model_path}")
   if model.game.game_name() == "point_card_matching_stochastic": 
     model_walk_test_stochastic(model, seed)

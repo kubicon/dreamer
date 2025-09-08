@@ -6,7 +6,7 @@ import jax.numpy as jnp
 from train_utils import symlog
 import chex
 
-def sample_categorical(logits: jax.Array, key, uniform_mix: float = 0.01)-> jax.Array:
+def sample_categorical(logits: jax.Array, key, uniform_mix: float = 0.01, sample_threshold: float = 0.0)-> jax.Array:
   """Given a PRNG key produced by split, sample from each
   of the categorical distributions logits and return the
   one-hot encoded outcome for each of the distributions.
@@ -14,17 +14,28 @@ def sample_categorical(logits: jax.Array, key, uniform_mix: float = 0.01)-> jax.
   make sure the key passed to it is not reused.
   Uniform_mix creates a mixture between the actual logits induced distribution
   and uniform distribution, to prevent KL losses spike early
-  as described in https://arxiv.org/pdf/2301.04104 page 5. """
+  as described in https://arxiv.org/pdf/2301.04104 page 5.
+  Sample threshold ensures that outcomes with probability lower than 
+   this threshold are ignored (with the exception of if that would cause
+   an categorical to have no valid outcomes). """
   # Calculate the logits-induced probability.
-  probs = jax.nn.softmax(logits, axis=-1)
+  starting_probs = jax.nn.softmax(logits, axis=-1)
+  max_probs = jnp.max(starting_probs, axis=-1)
+  #Make sure the thresholding does not make 
+  # any categorical have no valid outcomes
+  threshold = jnp.minimum(sample_threshold, jnp.min(max_probs))
+  #perform the thresholding
+  probs = starting_probs * (starting_probs >= threshold)
+  #renormalize
+  normalization = jnp.sum(probs, axis=-1, keepdims=True)
+  probs = probs / (normalization + (normalization == 0))
   uniform = jnp.ones_like(probs) / probs.shape[-1]
   # Mix the probability with the uniform distribution.
   probs = (1.0 - uniform_mix) * probs + uniform_mix * uniform
   # Recalculate the logits
   logits_with_uniform = jnp.log(probs)
-  logits = jnp.where(uniform_mix > 0, logits_with_uniform, logits)
   num_classes = logits.shape[-1]
-  sampled_classes = jax.random.categorical(key, logits, axis=-1)
+  sampled_classes = jax.random.categorical(key, logits_with_uniform, axis=-1)
   oh_sampled_classes = jax.nn.one_hot(sampled_classes, num_classes, axis=-1)
   #Perform the STE
   output = jax.lax.stop_gradient(oh_sampled_classes) + (probs - jax.lax.stop_gradient(probs))
@@ -78,6 +89,7 @@ def two_hot_encode(bins: jax.Array, value:jax.Array, use_symlog= True) -> jax.Ar
   total = start_dist + end_dist
   weight_start = start_dist / total
   weight_end = end_dist / total
+
 
   #Watch out!!! The end weight needs to go to the start and vice-versa.
   # The reason for that is because rather than the distance, we want the probability

@@ -5,13 +5,42 @@ from games.jax_game import GameState
 import os
 import pickle
 
-def symlog(x: jax.Array):
+
+def symlog(x: chex.Array):
   return jnp.sign(x) * jnp.log(jnp.abs(x) + 1)
 
-def symexp(x: jax.Array):
+def symexp(x: chex.Array):
   return jnp.sign(x) * (jnp.exp(jnp.abs(x)) - 1)
 
-def get_loss_mean_with_mask(loss: jax.Array, mask: jax.Array) -> jax.Array:
+def legal_policy(logit: chex.Array, legal: chex.Array):
+  """Get a softmaxed policy out of logit, with
+  zeros at illegal actions. Assumes that these have actions in the last
+  dimension and the same shape."""
+  chex.assert_equal_shape([logit, legal])
+  shifted_logit = logit - logit.max(axis=-1, keepdims=True)
+  exp_logit = jnp.exp(shifted_logit)
+  #The only way this can potentially break is 
+  # if +- inf or NaN appears already in the exp_logit
+  # at which point it is an error in the network
+  masked_exp_logit = exp_logit * legal
+  policy = masked_exp_logit / jnp.sum(masked_exp_logit, axis=-1, keepdims=True)
+  return policy
+
+def legal_log_policy(logit: chex.Array, legal: chex.Array):
+  """Uses a legal_policy to get the masked policy
+  and then return a log of it, with the exception
+  of illegal actions which have 0 instead of -inf. 
+  Assumes that these have actions in the last
+  dimension and the same shape."""
+  chex.assert_equal_shape([logit, legal])
+  policy = legal_policy(logit, legal)
+  #The where instead of * legal
+  # is because -inf * 0 would produce NaN
+  log_policy = jnp.where(legal, jnp.log(policy), 0)
+  return log_policy
+
+
+def get_loss_mean_with_mask(loss: chex.Array, mask: chex.Array) -> chex.Array:
   """Mask a loss using mask and compute its mean, 
   such that elements with 0 in the mask are correctly ignored.
     Make sure loss and mask are of broadcastable dimensions. """
@@ -20,6 +49,7 @@ def get_loss_mean_with_mask(loss: jax.Array, mask: jax.Array) -> jax.Array:
   summed_loss = jnp.sum(masked_loss)
   return summed_loss / (normalization_factor + (normalization_factor == 0))
 
+  
 
 
 @chex.dataclass(frozen=True)
@@ -29,6 +59,28 @@ class PredictionStep():
   reward_dist_logit: chex.Array
   done_logit: chex.Array
   dynamics_state: chex.Array
+
+@chex.dataclass(frozen=True)
+class PredictionStepWithLegal():
+  repr_state: chex.Array
+  decoded_obs: chex.Array
+  reward_dist_logit: chex.Array
+  done_logit: chex.Array
+  legal_logit: chex.Array
+  dynamics_state: chex.Array
+
+
+@chex.dataclass(frozen=True)
+class RNaDTimeStep():
+  
+  obs: chex.Array = () # [..., Player, iset_dim] for multi agent or [..., obs_dim] for single_agent
+  legal: chex.Array = () # [..., Player, A] for multi agent or [..., A] for single_agent
+  
+  action: chex.Array = () # [..., Player, A] for multi agent or [..., A] for single agent
+  policy: chex.Array = () # [..., Player, A] for multi agent or [..., A] for single agent
+  
+  reward: chex.Array = () # [...] Reward after playing an action
+  valid: chex.Array = () # [...] Flag determining, whether we should train in this state
 
 @chex.dataclass(frozen=True)
 class TimeStep():
@@ -74,8 +126,38 @@ class DreamerConfig():
   decoder_network_details: tuple[int, int] = (256, 1)
   dynamics_network_details: tuple[int, int] = (256, 1)
   predictor_network_details: tuple[int, int] = (256, 1)
+
+@chex.dataclass(frozen=True)
+class DreamerMAConfig():
+  batch_size: int
+  seed: int
+
+  hidden_state_size: int #Size of the RNN hidden state
+  encoded_classes: int # Number of classes for each categorical distribution in state
+  encoded_categories: int # Number of categorical distributions in state
+
+  learning_rate: float
+  rng_seed: int
+
+
+
+  #Weights of the individual loss terms of the world model
+  beta_prediction: float = 1
+  beta_dynamics: float = 1
+  beta_representation: float = 0.1
+
+  free_bits_clip_threshold: float = 1 #Threshold for loss clip in free bits. 
   
-def get_reference_policy(game_state: GameState, legal_actions: jax.Array):
+  bin_range: int = 20 #Number of the exponentially spaced bins for certain predictions such as reward in one direction, bins will be spaced out as symexp([-bin_range, ..., bin_range])
+  
+  # Ordered as (hidden_layer_features, num_hidden_layers)
+  encoder_network_details: tuple[int, int] = (256, 1)
+  decoder_network_details: tuple[int, int] = (256, 1)
+  dynamics_network_details: tuple[int, int] = (256, 1)
+  predictor_network_details: tuple[int, int] = (256, 1)
+  legal_actions_network_details: tuple[int, int] = (256, 1)
+  
+def get_reference_policy(game_state: GameState, legal_actions: chex.Array):
   """Returns the reference sampling policy. For now returns just a uniform policy.
   TODO: This is just for the basic testing, change this function"""
   return legal_actions / legal_actions.sum(axis=-1, keepdims=True)
