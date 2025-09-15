@@ -12,12 +12,13 @@ class FrozenLakeGameState(GameState):
     timestep: chex.Array  # current timestep
     gold_collected: chex.Array  # total gold collected
     terminal: chex.Array  # whether game is over
-    turn: chex.Array
+    last_chosen_action: chex.Array #Last chosen action for chance nodes
 
 
 class FrozenLake(JaxGame):
-  """FIXME: This game uses the old jax game interface. Rework this into the new one
-  with explicitly modelled chance nodes!"""
+  """FIXME: This was not tested in the 
+  explicit chance nodes interface yet. It is possible
+  that it will still need bugfixes."""
   def __init__(self, board: jnp.ndarray, init_position: tuple[int, int] = (0, 0), max_timesteps: int = 50, eps: float = 0.1):
     padded_board = jnp.pad(board, ((1, 1), (1, 1)), mode='constant', constant_values=3)  # HxW, where 0 is empty tile, 1 is gold, 2 is hole, 3 is wall
     self.init_board = jax.nn.one_hot(padded_board, 4)
@@ -61,16 +62,44 @@ class FrozenLake(JaxGame):
     return 4  # up, down, left, right
   
   def max_trajectory_length(self):
-      return self.max_timesteps
+      # Each step is followed by chance node
+      return self.max_timesteps * 2
+  
+  def max_trajectory_lenght_no_chance(self):
+    return self.max_timesteps
+  
+  def max_chance_outcomes(self):
+    #Chance nodes randomly choose one of the actions
+    return self.num_distinct_actions()
+  
+  def is_chance(self, game_state: FrozenLakeGameState):
+    #Chance nodes happen on the odd turns
+    return (game_state.timestep % 2) == 1
+  
+  @functools.partial(jax.jit, static_argnums=(0))
+  def get_outcomes_and_probs(self, game_state: FrozenLakeGameState):
+    actions = self.num_distinct_actions()
+    outcomes = jnp.arange(actions)
+    is_chance = (game_state.timestep % 2) == 1
+
+    chosen_action = jax.nn.one_hot(game_state.last_chosen_action, actions)
+    non_chosen_actions = 1 - chosen_action
+    chosen_prob = chosen_action * (1 - self.eps + (self.eps / actions))
+    non_chosen_prob = non_chosen_actions * (self.eps / actions)
+
+    probs = jnp.where(is_chance, chosen_prob + non_chosen_prob, jnp.zeros(actions))
+
+    return outcomes, probs
   
   @functools.partial(jax.jit, static_argnums=(0,))
-  def initialize_structures(self, key):
+  def initialize_structures(self):
     game_state = FrozenLakeGameState(
         board=self.init_board,
         player_pos=self.init_player_pos,
         timestep=0,
         gold_collected=0,
-        terminal=False
+        terminal=False,
+        last_chosen_action = jnp.array(-1)
     )
     # All actions are legal initially
     legal_actions = jnp.ones(4)
@@ -101,10 +130,13 @@ class FrozenLake(JaxGame):
         gold_collected,
         terminal
     ])
+    is_chance = game_state.timestep % 2 == 1
+    state_tensor = jnp.where(is_chance, jnp.zeros_like(state_tensor), state_tensor)
+    observation_tensor = jnp.where(is_chance, jnp.zeros_like(observation_tensor), observation_tensor)
     return state_tensor, observation_tensor
   
   @functools.partial(jax.jit, static_argnums=(0,))
-  def apply_action(self, game_state: FrozenLakeGameState, key, turn, actions):
+  def apply_action(self, game_state: FrozenLakeGameState, key, actions):
     # actions is a single integer action (0=up, 1=right, 2=down, 3=left)
     action = actions
     
@@ -151,7 +183,8 @@ class FrozenLake(JaxGame):
         player_pos=new_pos,
         timestep=game_state.timestep + 1,
         gold_collected=new_gold_collected,
-        terminal=terminal
+        terminal=terminal,
+        last_chosen_action = action
     )
     
     reward = jnp.where(hit_hole, -10, gold_gained)

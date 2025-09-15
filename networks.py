@@ -447,7 +447,7 @@ def initialize_dreamer_optimizers(config: DreamerConfig, game: JaxGame, rngs: nn
     tx=optax.adam(learning_rate=config.learning_rate),
   )
   
-  optims = DreamerMAOptimizers(
+  optims = DreamerOptimizers(
     sequence_optimizer=sequence_optimizer,
     encoder_optimizer=encoder_optimizer,
     decoder_optimizer=decoder_optimizer,

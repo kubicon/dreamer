@@ -597,7 +597,7 @@ class RNaDDreamer():
     
     vectorized_sample_action = nnx.vmap(choice_wrapper, in_axes=(0, 0), out_axes=0)
 
-    @nnx.scan(in_axes = (nnx.Carry, 0, None), out_axes=(nnx.Carry, 0, 0))
+    @nnx.scan(in_axes = (nnx.Carry, 0, None), out_axes=(nnx.Carry, 0, 0, 0))
     def _sample_trajectory(carry: SampleTrajectoryCarry, key , rnad_network: RNaDNetwork) -> tuple[SampleTrajectoryCarry, chex.Array]:
       
       _, p1_iset, p2_iset, _ = self.world_model.game.get_info(carry.game_state)
@@ -620,18 +620,16 @@ class RNaDDreamer():
       def apply_action():
         return self.world_model.game.apply_action(carry.game_state, action)
       def sample_chance():
-        outcomes, legals, probs = self.world_model.game.get_outcomes_and_probs(carry.game_state)
-        num_outcomes = len(probs)
-        chosen_outcome = jax.random.choice(chance_key, jnp.arange(num_outcomes), p=probs)
-        oh_outcome = jax.nn.one_hot(chosen_outcome, num_outcomes)
-        chosen_legals = jnp.sum(oh_outcome[..., None, None] * legals, axis=0)
-        outcome = jax.tree_util.tree_map(lambda x: jnp.sum(x * jnp.reshape(oh_outcome, (oh_outcome.shape[0], ) + (1,) * len(x.shape[1:])), axis=0).astype(x.dtype),outcomes)
-        #TODO: For now the assumption is that chance nodes do not lead to terminal state
-        # This process can be made part of apply_action to allow for that (supported in Leduc
-        # but always is non terminal and 0 reward anyway)
-        return outcome, jnp.array(False), jnp.array(0, dtype=jnp.float32), chosen_legals
+        outcomes, probs = self.world_model.game.get_outcomes_and_probs(carry.game_state)
+        # Do not forget for deterministic games to put nonzero probs
+        # to sample something for shape consistency
+        probs = jnp.where(is_chance, probs, jnp.ones_like(probs)/ probs.shape[0])
+        chosen_outcome = jax.random.choice(chance_key, outcomes, p=probs)
+        outcome, terminal, reward, chosen_legals = self.world_model.game.apply_action(carry.game_state, chosen_outcome)
+        return outcome, terminal, reward, chosen_legals
       next_game_state, next_terminal, next_rewards, next_legal = jax.lax.cond(is_chance, sample_chance, apply_action)
       next_terminal = jnp.logical_or(carry.terminal, next_terminal)
+      next_chance = self.world_model.game.is_chance(next_game_state)
       valid = jnp.ones_like(next_rewards) - carry.terminal
       timestep = RNaDTimeStep(
         obs = obs,
@@ -648,11 +646,22 @@ class RNaDDreamer():
       )
          
       timestep = jax.tree_util.tree_map(lambda t, f: jnp.where(carry.terminal, t, f), self.example_timestep, timestep)
-      return new_carry, timestep, is_chance
-    _, timestep, is_chance = _sample_trajectory(init_carry, trajectory_key, rnad_network)
+      return new_carry, timestep, is_chance, next_chance
+    _, timestep, is_chance, next_chance = _sample_trajectory(init_carry, trajectory_key, rnad_network)
+    #Filter out the chance nodes.
+    # Just a bit tricky, since most of the timestep is related
+    # directly to the state, but reward is actually also related to the next state.
+    # So, because playing an action that produces chance node returns an invalid reward,
+    # and the actual reward will be returned in the chance node, we need to filter
+    # out the reward one step BEFORE the chance node
     non_chance = jnp.nonzero(~is_chance, size=self.non_chance_trajectory_max)[0]
-    filtered_timestep = jax.tree_util.tree_map(lambda x: jnp.take_along_axis(x, non_chance.reshape((non_chance.shape[0],) + (1,) * (x.ndim - 1)), axis=0), timestep)
-    #jax.debug.breakpoint()
+    non_next_chance = jnp.nonzero(~next_chance, size=self.non_chance_trajectory_max)[0]
+    filtered_timestep = RNaDTimeStep(obs = jnp.take_along_axis(timestep.obs, non_chance[..., None, None], axis=0),
+                                    legal = jnp.take_along_axis(timestep.legal, non_chance[..., None, None], axis=0),
+                                    action = jnp.take_along_axis(timestep.action, non_chance[..., None, None], axis=0),
+                                    policy = jnp.take_along_axis(timestep.policy, non_chance[..., None, None], axis=0),
+                                    reward = jnp.take_along_axis(timestep.reward, non_next_chance, axis=0),
+                                    valid = jnp.take_along_axis(timestep.valid, non_chance, axis=0))
     #[Trajectory, ...]
     return filtered_timestep
     

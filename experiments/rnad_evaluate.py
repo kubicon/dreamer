@@ -103,14 +103,12 @@ def model_best_response(model: RNaDDreamer):
   p2_br = {}
   game_actions = game.num_distinct_actions()
 
-  # not_acting_legals = np.array([1, 0, 0, 0])
-  # chance_legals = np.array([[1, 0, 0, 0], [1, 1, 1, 1]])
 
   depth_continuations = [] #[D, H(D), A(D), A(D)]
   depth_chance_probabilities = [] #[D, H(D), A(D), A(D)]
   depth_rewards = [] #[D, H(D), A(D), A(D)] only from player one perspective
   depth_actions = [] #[D, Pl, H(D), A(D)]
-  depth_iset_map = [] #[D, Pl, I], dictionaries 
+  depth_iset_map = [] #[D, Pl, I]
   depth_iset_legal = [] # [D, Pl, I, A(D)]
   depth_history_iset = [] # [D, Pl, H(D)]
   depth_history_legal = [] # [D, Pl, H(D), A(D), A(D)]
@@ -142,7 +140,7 @@ def model_best_response(model: RNaDDreamer):
 
     state_tensors, p1_isets, p2_isets, public_states = vectorized_get_info(game_states)
     #[H(D), max_{d}A(D), ...]
-    chance_outcomes, outcome_legals, chance_probs = vectorized_chance_info(game_states)
+    chance_outcomes, chance_probs = vectorized_chance_info(game_states)
     #Chance probs are padded, but we only actually need the first A(D) of them, 
     # since the others will surely correspond to a non-valid chance outcomes
     # The padding here is just in case there are more legal

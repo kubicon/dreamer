@@ -92,15 +92,13 @@ class DreamerMA():
       reward: chex.Array
       terminal: bool
       valid: bool
-      prev_chance: bool
       
     init_carry = SampleTrajectoryCarry(
       game_state = game_state,
       legal_actions = legal_actions,
       reward = jnp.array(0),
       terminal = jnp.array(False),
-      valid = jnp.array(True),
-      prev_chance = jnp.array(False)
+      valid = jnp.array(True)
     )
     
     
@@ -113,7 +111,7 @@ class DreamerMA():
     
     vectorized_sample_action = nnx.vmap(choice_wrapper, in_axes=(0, 0), out_axes=0)
 
-    @nnx.scan(in_axes = (nnx.Carry, 0), out_axes=(nnx.Carry, 0, 0, 0))
+    @nnx.scan(in_axes = (nnx.Carry, 0), out_axes=(nnx.Carry, 0, 0))
     def _sample_trajectory(carry: SampleTrajectoryCarry, key) -> tuple[SampleTrajectoryCarry, chex.Array]:
       
       state, p1_iset, p2_iset, public_state = self.game.get_info(carry.game_state)
@@ -140,16 +138,13 @@ class DreamerMA():
       def apply_action():
         return self.game.apply_action(carry.game_state, action)
       def sample_chance():
-        outcomes, legals, probs = self.game.get_outcomes_and_probs(carry.game_state)
-        num_outcomes = len(probs)
-        chosen_outcome = jax.random.choice(chance_key, jnp.arange(num_outcomes), p=probs)
-        oh_outcome = jax.nn.one_hot(chosen_outcome, num_outcomes)
-        chosen_legals = jnp.sum(oh_outcome[..., None, None] * legals, axis=0)
-        outcome = jax.tree_util.tree_map(lambda x: jnp.sum(x * jnp.reshape(oh_outcome, (oh_outcome.shape[0], ) + (1,) * len(x.shape[1:])), axis=0).astype(x.dtype),outcomes)
-        #TODO: For now the assumption is that chance nodes do not lead to terminal state
-        # This process can be made part of apply_action to allow for that (supported in Leduc
-        # but always is non terminal and 0 reward anyway)
-        return outcome, jnp.array(False), jnp.array(0, dtype=jnp.float32), chosen_legals
+        outcomes, probs = self.game.get_outcomes_and_probs(carry.game_state)
+        # Do not forget for deterministic games to put nonzero probs
+        # to sample something for shape consistency
+        probs = jnp.where(is_chance, probs, jnp.ones_like(probs)/ probs.shape[0])
+        chosen_outcome = jax.random.choice(chance_key, outcomes, p=probs)
+        outcome, terminal, reward, chosen_legals = self.game.apply_action(carry.game_state, chosen_outcome)
+        return outcome, terminal, reward, chosen_legals
       next_game_state, next_terminal, next_rewards, next_legal = jax.lax.cond(is_chance, sample_chance, apply_action)
       #Action in terminal state is not valid
       next_terminal = jnp.logical_or(carry.terminal, next_terminal)
@@ -159,31 +154,17 @@ class DreamerMA():
         legal_actions=jnp.where(next_terminal, self.example_timestep.legal, next_legal),
         reward = next_rewards,
         terminal = next_terminal,
-        valid = next_valid,
-        prev_chance = is_chance
+        valid = next_valid
       )
         
       
       timestep = jax.tree.map(lambda t, f: jnp.where(carry.valid, t, f), timestep, self.example_timestep)
       
-      return new_carry, timestep, is_chance, carry.prev_chance
-    _, timestep, is_chance, prev_chance = _sample_trajectory(init_carry, trajectory_key)
+      return new_carry, timestep, is_chance
+    _, timestep, is_chance = _sample_trajectory(init_carry, trajectory_key)
     #This is used to remove the chance nodes from the trajectory
-    #A little bit tricky, since the reward, terminal and valid
-    # of the state are with respect to applying action in the previous state
-    # So, we need to separate what we want to remove for these indices and what for one
-    # index after
     non_chance = jnp.nonzero(~is_chance, size=self.non_chance_trajectory_max)[0]
-    non_prev_chance = jnp.nonzero(~prev_chance, size=self.non_chance_trajectory_max)[0]
-    filtered_timestep = TimeStep(
-        obs = jnp.take_along_axis(timestep.obs, non_chance[..., None, None], axis=0),
-        legal = jnp.take_along_axis(timestep.legal, non_chance[..., None, None], axis=0),
-        action = jnp.take_along_axis(timestep.action, non_chance[..., None, None], axis=0),
-        policy = jnp.take_along_axis(timestep.policy, non_chance[..., None, None], axis=0),
-        reward = jnp.take_along_axis(timestep.reward, non_prev_chance, axis=0),
-        valid = jnp.take_along_axis(timestep.valid, non_prev_chance, axis=0),
-        terminal = jnp.take_along_axis(timestep.terminal, non_prev_chance, axis=0)
-    )
+    filtered_timestep = jax.tree_util.tree_map(lambda x: jnp.take_along_axis(x, jnp.expand_dims(non_chance, axis=range(1, x.ndim)), axis=0), timestep)
     #[Trajectory, ...]
     return filtered_timestep
   
@@ -252,14 +233,13 @@ class DreamerMA():
       posterior = nnx.softmax(predictions.repr_state, axis=-1)
       prior = nnx.softmax(predictions.dynamics_state, axis=-1)
       #[Trajectory, Batch]
-      dynamics_loss = jnp.maximum(self.config.free_bits_clip_threshold, kl_divergence(jax.lax.stop_gradient(posterior), prior))
+      dynamics_loss = kl_divergence(jax.lax.stop_gradient(posterior), prior)
       #dynamics_loss =  kl_divergence(jax.lax.stop_gradient(posterior), prior)
       #dynamics_mask = jnp.logical_and(timestep.valid, jnp.logical_not(timestep.terminal))
-      l_dyn += get_loss_mean_with_mask(dynamics_loss, timestep.valid)
+      l_dyn += jnp.maximum(self.config.free_bits_clip_threshold, get_loss_mean_with_mask(dynamics_loss, timestep.valid))
       #[Trajectory, Batch]
-      repr_loss = jnp.maximum(self.config.free_bits_clip_threshold, kl_divergence(posterior, jax.lax.stop_gradient(prior)))
       repr_loss = kl_divergence(posterior, jax.lax.stop_gradient(prior))
-      l_rep += get_loss_mean_with_mask(repr_loss, timestep.valid)
+      l_rep += jnp.maximum(self.config.free_bits_clip_threshold, get_loss_mean_with_mask(repr_loss, timestep.valid))
 
 
       return self.config.beta_prediction * l_pred + self.config.beta_dynamics * l_dyn + self.config.beta_representation * l_rep

@@ -1,6 +1,5 @@
 from abc import ABC, abstractmethod
 import chex
-import jax
 import jax.numpy as jnp
     
 class GameState(ABC):
@@ -9,9 +8,14 @@ class GameState(ABC):
 
 #Abstract parent class for any jax game
 class JaxGame(ABC):
+  """Abstract parent class for any JaxGame.
+  Chance nodes are supported and represented explicitly.
+  Generally, multiple chance nodes following each other are not fully
+  supported, but note that these can be represented as a single chance node."""
   
-  def new_initial_state(self, key):
-    init_state, legals = self.initialize_structures(key)
+  def new_initial_state(self):
+    """Returns the information tensors for the initial state"""
+    init_state, legals = self.initialize_structures()
     return self.get_info(init_state)
   
   # Do not use this method if you plan to use any other tensor
@@ -45,32 +49,45 @@ class JaxGame(ABC):
     """Return whether the given game state is a chance node."""
     return jnp.array(False)
   
-  def get_outcomes_and_probs(self, game_state:GameState) ->tuple[GameState, chex.Array, chex.Array]:
-    """Gets the chance outcomes and probabilities of them for a game state at given turn.
-    Returns invalid output if the state is not a chance node."""
-    expanded_state = jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, axis=0), game_state)
-    return expanded_state, jnp.ones((1, self.num_players(), self.num_distinct_actions())), jnp.zeros(1)
 
-  def get_outcomes_and_probs_with_check(self, game_state:GameState) ->tuple[GameState, chex.Array, chex.Array]:
-    """Gets all chance outcome states and their respective probabilities
+  def get_outcomes_and_probs(self, game_state:GameState) ->tuple[chex.Array, chex.Array]:
+    """Gets the chance outcomes and probabilities of them for a game state at given turn.
+    Outcomes here are just actions, that will be passed to apply_action to get the actual
+    post chance node states.
+    Returns invalid output if the state is not a chance node."""
+    if self.num_players() == 1:
+      return jnp.zeros(1), jnp.zeros(1)
+    return jnp.zeros((1, self.num_players())), jnp.zeros(1)
+
+  def get_outcomes_and_probs_with_check(self, game_state:GameState) ->tuple[chex.Array, chex.Array]:
+    """Gets all chance outcomes and their respective probabilities
     for a chance node. This version checks whether the state is 
     actually a chance node first, and will not allow being called on none chance nodes
     (where the behavior is undefined). Uses standard Python assert and as such will not work under vmap"""
     assert self.is_chance(game_state), "Tried getting the chance outcomes and their probabilities of a non chance node!"
     return self.get_outcomes_and_probs(game_state)
   
-  def max_chance_outcomes(self):
+  def max_chance_outcomes(self) ->int:
     """Returns the maximum chance outcomes of any chance
     node in the game."""
     return 1
   
-  def depth_chance_outcomes(self, depth:int):
+  def depth_chance_outcomes(self, depth:int) ->int:
     """Return how many of the first indices of probs 
     gotten by get_outcomes_and_probs can contain valid chance outcomes 
-    at the given tree depth"""
+    at the given tree depth. This does not necessarily mean
+    that all of the indices have a nonzero prob. This is merely meant
+    to filter outcomes that are certainly invalid."""
     return 1
   
-  def max_trajectory_lenght_no_chance(self):
+  def depth_chance_valid_outcomes(self, depth:int) ->int:
+    """Return how many possible chance outcomes are there
+    at given depth. Unlike depth_chance_outcomes, this returns
+    the actual amount of the outcomes, but not their index range (eg.
+    using this for indexing can filter out valid outcomes)"""
+    return 1
+  
+  def max_trajectory_lenght_no_chance(self) ->int:
     """Returns the maximum lenght of the game trajectory
     excluding chance nodes. Useful when we want to filter out
     the chance nodes under jit."""
@@ -89,40 +106,51 @@ class JaxGame(ABC):
     pass
 
   @abstractmethod
-  def state_tensor_shape(self):
+  def state_tensor_shape(self) ->int:
     pass
   
   @abstractmethod
-  def observation_tensor_shape(self):
+  def observation_tensor_shape(self) ->int:
     pass
   
   @abstractmethod
-  def information_state_tensor_shape(self):
+  def information_state_tensor_shape(self) ->int:
     pass
     
   @abstractmethod
-  def public_state_tensor_shape(self):
+  def public_state_tensor_shape(self) ->int:
     pass
   
   @abstractmethod
-  def num_distinct_actions(self):
+  def num_distinct_actions(self) ->int:
     pass
   
   @abstractmethod
-  def max_trajectory_length(self):
+  def max_trajectory_length(self) ->int:
     pass
   
   #returns game_state, legal_actions
   @abstractmethod
-  def initialize_structures(self):
+  def initialize_structures(self) -> tuple[GameState, chex.Array]:
+    """Returns a tuple of initial game state
+    and its legal actions"""
     pass
 
   #returns state_tensor, p1_iset_tensor, p2_iset_tensor, public_state_tensor
+  # for multi agent and state_tensor, observation_tensor for single agent
   @abstractmethod
   def get_info(self, game_state):
+    """Get information tensor about the state. For 
+    multi-agent setting, this is and ordered 4-tuple state_tensor, p1_iset_tensor,
+    p2_iset_tensor, public_state_tensor. For single-agent,
+    this is an ordered 2-tuple state_tensor, observation_tensor"""
     pass
 
   #returns new_game_state, terminal, rewards, new_legals
   @abstractmethod
-  def apply_action(self, game_state, actions):
+  def apply_action(self, game_state: GameState, actions: chex.Array) ->tuple[GameState, chex.Array, chex.Array, chex.Array]:
+    """Apply the joint action to the game state. The actions should be
+    of shape (num_players), specifying an action of each player.
+    Returns a tuple of new game state, terminal flag of the new game state,
+    reward for applying the action and legal actions of the new game state"""
     pass

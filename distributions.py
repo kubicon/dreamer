@@ -28,6 +28,7 @@ def sample_categorical(logits: jax.Array, key, uniform_mix: float = 0.01, sample
   probs = starting_probs * (starting_probs >= threshold)
   #renormalize
   normalization = jnp.sum(probs, axis=-1, keepdims=True)
+  #TODO: The normalization == 0 is probably not necessary
   probs = probs / (normalization + (normalization == 0))
   uniform = jnp.ones_like(probs) / probs.shape[-1]
   # Mix the probability with the uniform distribution.

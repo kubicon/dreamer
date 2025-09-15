@@ -73,6 +73,13 @@ class JaxLeduc(JaxGame):
       return self.total_cards
     return 1
   
+  def depth_chance_valid_outcomes(self, depth:int):
+    if depth == 0:
+      return self.private_chance_outcomes
+    elif depth >= 3 and depth <= 5:
+      return self.total_cards - 2
+    return 1
+  
   def game_name(self):
     return "leduc"
   
@@ -163,13 +170,24 @@ class JaxLeduc(JaxGame):
   
   @functools.partial(jax.jit, static_argnums=(0))
   def get_outcomes_and_probs(self, game_state:LeducGameState) -> tuple[LeducGameState, chex.Array, chex.Array]:
-    def invalid_outcomes(game_state):
-      stacked_game_state = jax.tree_util.tree_map(lambda x: jnp.tile(x[None, ...], (self.private_chance_outcomes,) + (1,) * len(x.shape)), game_state)
-      return stacked_game_state, jnp.ones((self.private_chance_outcomes, self.num_players(), self.num_actions)), jnp.zeros(self.private_chance_outcomes)
-    outcomes, legals, probs = jax.lax.cond(game_state.is_chance,
-                                           lambda s: jax.lax.cond(s.turn == 0, self.generate_all_private_card_nodes, self.generate_all_public_card_nodes, s) 
-                                           , invalid_outcomes, game_state)
-    return outcomes, legals, probs
+    outcomes = jnp.stack([jax.nn.one_hot(0, self.private_chance_outcomes), jnp.arange(self.private_chance_outcomes)])
+    def invalid_probs(game_state):
+      
+      return jnp.zeros(self.private_chance_outcomes)
+    
+    def private_probs(game_state:LeducGameState):
+
+      return jnp.ones(self.private_chance_outcomes) / self.private_chance_outcomes
+    
+    def public_probs(game_state: LeducGameState):
+      valid = 1 - jnp.sum(jax.nn.one_hot(game_state.private_cards, self.total_cards), axis=0)
+      valid = jnp.pad(valid, (0, self.private_chance_outcomes - self.total_cards), constant_values=0)
+      return valid / jnp.sum(valid)
+    
+    probs = jax.lax.cond(game_state.is_chance,
+                                           lambda s: jax.lax.cond(s.turn == 0, private_probs, public_probs, s) 
+                                           , invalid_probs, game_state)
+    return outcomes, probs
    
   
        
@@ -218,9 +236,6 @@ class JaxLeduc(JaxGame):
   
   @functools.partial(jax.jit, static_argnums=(0))
   def apply_action(self, game_state:LeducGameState, actions: chex.Array):
-   """TODO: This requires call to the get_outcomes_and_probs to actually get
-   the chance probabilities, which we typically want in search, but it also
-   calls it internally. Cant something be done about that?"""
    return jax.lax.cond(game_state.is_chance, self.apply_action_chance, self.apply_action_no_chance, game_state, actions)
   
   @functools.partial(jax.jit, static_argnums=(0))
@@ -331,15 +346,14 @@ def main():
     if terminal:
       return
     if game.is_chance(state):
-      next_states, next_legals, probs = game.get_outcomes_and_probs(state)
+      outcomes,  probs = game.get_outcomes_and_probs(state)
       # print(f"Next states: {next_states}")
       # print(f"Probs: {probs}")
-      for i, item in enumerate(zip(next_legals, probs)):
-        next_legal, prob = item
+      for outcome, prob in enumerate(outcomes, probs):
         if prob < 1e-5:
           continue
-        next_state = jax.tree_util.tree_map(lambda x : x[i], next_states)
-        _tree_walk(next_state, next_legal, False, depth=depth + 1)
+        new_state, new_terminal, reward, new_legals = game.apply_action(state, outcome)
+        _tree_walk(new_state, new_legals, False, depth=depth + 1)
       return
     for a1i, a1 in enumerate(legals[0]):
       if a1 < 0.5:
