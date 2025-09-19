@@ -108,12 +108,13 @@ def unroll_chance_node(game: JaxGame, game_state: GameState, num_chance_outcomes
   outcomes, probs = game.get_outcomes_and_probs(game_state)
   vectorized_apply = jax.vmap(game.apply_action, in_axes=(None, 0), out_axes=(0, 0, 0, 0))
   next_states, next_terminal, rewards, next_legal = vectorized_apply(game_state, outcomes)
-  valid = jnp.nonzero(probs, size=num_chance_outcomes)[0]
+  valid = jnp.nonzero(probs >= 1e-5, size=num_chance_outcomes)[0]
   next_states = jax.tree_util.tree_map(lambda x: jnp.take_along_axis(x, jnp.expand_dims(valid, axis=range(1, x.ndim)), axis=0), next_states)
   next_terminal = jnp.take_along_axis(next_terminal, jnp.expand_dims(valid, axis=range(1, next_terminal.ndim)), axis=0)
   rewards = jnp.take_along_axis(rewards, jnp.expand_dims(valid, axis=range(1, rewards.ndim)), axis=0)
   next_legal = jnp.take_along_axis(next_legal, jnp.expand_dims(valid, axis=range(1, next_legal.ndim)), axis=0)
-  return next_states, next_terminal, rewards, next_legal
+  next_probs = jnp.take_along_axis(probs, jnp.expand_dims(valid, axis=range(1, probs.ndim)), axis=0)
+  return next_states, next_terminal, rewards, next_legal, next_probs
 
 def cartesian_product(*arrays):
     """Implementation of cartesian product of 
@@ -124,6 +125,56 @@ def cartesian_product(*arrays):
     for i, a in enumerate(np.ix_(*arrays)):
         arr[...,i] = a
     return arr.reshape(-1, la)
+
+def stringify(x)->str :
+   x = np.asarray(x)
+   return np.array2string(x)
+
+
+def isets_close(iset1, iset2, tolerance=0.05):
+   return np.sum((iset1 - iset2) ** 2) <= tolerance
+
+def find_closest_index(iset_map: np.ndarray, ref_iset: np.ndarray, tolerance=0.05):
+  """Finds the iset index in the given iset map
+  based on closeness and returns it, or -1
+  if no iset close enough within tolerance is found """
+  #Edge case for an empty iset map
+  if iset_map.shape == (0,):
+    return -1
+  iset_distance = np.sum((iset_map - ref_iset[None, ...]) ** 2, axis=-1)
+  valid_isets = iset_distance <= tolerance
+  # No valid iset was found
+  if np.sum(valid_isets) == 0:
+    return -1
+  # else return the best fitting candidate
+  return np.argmin(iset_distance)
+
+def create_iset_map(curr_iset, amount_actions, curr_legal):
+    """Creates an map where at index i there is an iset corresponding to the index.
+    Also returns per iset legal actions like this, per history player iset indices and per
+    history player action indices (actions are differentiated by which infoset they are taken)"""
+    isets = [[], []]
+    iset_map = [[], []]
+    iset_legal = [[], []]
+    for pl in range(curr_iset.shape[0]):
+      first_iset_id = len(iset_map[pl])
+      for i in range(curr_iset.shape[1]): 
+        curr_index = -1
+        for j in range(first_iset_id, len(iset_map[pl])):
+          if isets_close(iset_map[pl][j], curr_iset[pl, i]):
+            curr_index = j
+            break
+        if curr_index < 0:
+          curr_index = len(iset_map[pl])
+          iset_map[pl].append(curr_iset[pl, i])
+          iset_legal[pl].append(curr_legal[pl, i])
+        isets[pl].append(curr_index)
+        
+    isets = np.array(isets)
+    actions = isets[..., None] * amount_actions + np.arange(amount_actions)[None, None, ...] 
+    iset_map = [np.array(i) for i in iset_map]
+    iset_legal = [np.array(i) for i in iset_legal]
+    return iset_map, iset_legal, isets, actions
 
 def model_walk_test(model:Dreamer|DreamerMA,
                     all_outcome_check_fn,
@@ -175,7 +226,7 @@ def model_walk_test(model:Dreamer|DreamerMA,
     pi_mask = pi >= probability_eps
     actions = np.tile(np.arange(pi.shape[-1]), (num_players,1)).reshape(pi.shape)
     if is_ma:
-      valid_actions = actions[pi_mask].reshape((pi.shape[0], -1))
+      valid_actions = [actions[i][pi_mask[i]] for i in range(num_players)]
       joint_actions = cartesian_product(*valid_actions)
     else:
       joint_actions = actions[pi_mask]
@@ -190,7 +241,7 @@ def model_walk_test(model:Dreamer|DreamerMA,
       chance_outcomes = model.game.depth_chance_valid_outcomes(depth + 1)
       next_deters = check_outcomes(next_stoch_state, is_chance, chance_outcomes, probability_eps) 
       if is_chance:
-        next_states, next_terminals, next_rewards, next_legals = unroll_chance_node(model.game, next_state, chance_outcomes)
+        next_states, next_terminals, next_rewards, next_legals, next_probs = unroll_chance_node(model.game, next_state, chance_outcomes)
         
 
         next_terminals = np.asarray(next_terminals)
@@ -230,7 +281,7 @@ def model_walk_test(model:Dreamer|DreamerMA,
   init_chance =  model.game.is_chance(init_state)
   if init_chance:
     chance_outcomes = model.game.depth_chance_valid_outcomes(0)
-    next_states, next_terminals, next_rewards, next_legals = unroll_chance_node(model.game, next_state, chance_outcomes)
+    next_states, next_terminals, next_rewards, next_legals, next_probs = unroll_chance_node(model.game, next_state, chance_outcomes)
         
 
     next_terminals = np.asarray(next_terminals)

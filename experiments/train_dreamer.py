@@ -14,8 +14,8 @@ def create_dreamer_parser(multi_agent: bool = True) ->ArgumentParser:
   parser = ArgumentParser()
   ##Model parameters 
   parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training")
-  parser.add_argument("--encoded_categories", type=int, default=32, help="Number of categorical distributions in the latent state.")
-  parser.add_argument("--encoded_classes", type=int, default=32, help="Number of classes for each categorical distribution in the latent state.")
+  parser.add_argument("--encoded_categories", type=int, default=32, help="Number of options for each categorical distribution in the latent state.")
+  parser.add_argument("--encoded_classes", type=int, default=32, help="Number of categorical distributions in the latent state")
   parser.add_argument("--learning_rate", type=float, default=3e-4, help="Learning rate for the optimizer")
   parser.add_argument("--network_seed", type=int, default=-1, help="Random seed for network initialization")
   parser.add_argument("--trajectory_seed", type=int, default=-1, help="Random seed for trajectory generation")

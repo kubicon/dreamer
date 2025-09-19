@@ -170,7 +170,7 @@ class JaxLeduc(JaxGame):
   
   @functools.partial(jax.jit, static_argnums=(0))
   def get_outcomes_and_probs(self, game_state:LeducGameState) -> tuple[LeducGameState, chex.Array, chex.Array]:
-    outcomes = jnp.stack([jax.nn.one_hot(0, self.private_chance_outcomes), jnp.arange(self.private_chance_outcomes)])
+    outcomes = jnp.stack([jax.nn.one_hot(0, self.private_chance_outcomes), jnp.arange(self.private_chance_outcomes)], axis=-1)
     def invalid_probs(game_state):
       
       return jnp.zeros(self.private_chance_outcomes)
@@ -199,7 +199,7 @@ class JaxLeduc(JaxGame):
     action_history = jnp.zeros([self.max_turns, self.num_actions - 1])
     public_card = jnp.array(0, dtype=jnp.int16)
     turns_this_round = jnp.zeros(1, dtype=jnp.int16)
-    legals = jnp.stack([jnp.ones(self.num_actions), jax.nn.one_hot(0, self.num_actions)])
+    legals = jnp.ones((2, self.num_actions))
     game_state = LeducGameState(action_history=action_history,
                             public_card = public_card,
                             private_cards=jnp.full(2, -1, dtype=jnp.int16),

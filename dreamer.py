@@ -111,7 +111,7 @@ class Dreamer():
       return action, action_oh
 
 
-    @nnx.scan(in_axes = (nnx.Carry, 0), out_axes=(nnx.Carry, 0, 0, 0))
+    @nnx.scan(in_axes = (nnx.Carry, 0), out_axes=(nnx.Carry, 0, 0))
     def _sample_trajectory(carry: SampleTrajectoryCarry, key) -> tuple[SampleTrajectoryCarry, chex.Array]:
       
       state, obs = self.game.get_info(carry.game_state)
@@ -162,8 +162,8 @@ class Dreamer():
       
       timestep = jax.tree.map(lambda t, f: jnp.where(carry.valid, t, f), timestep, self.example_timestep)
       
-      return new_carry, timestep, is_chance, carry.game_state
-    _, timestep, is_chance, states = _sample_trajectory(init_carry, trajectory_key)
+      return new_carry, timestep, is_chance
+    _, timestep, is_chance = _sample_trajectory(init_carry, trajectory_key)
     #This is used to remove the chance nodes from the trajectory
     non_chance = jnp.nonzero(~is_chance, size=self.non_chance_trajectory_max)[0]
     filtered_timestep = jax.tree_util.tree_map(lambda x: jnp.take_along_axis(x, jnp.expand_dims(non_chance, axis=range(1, x.ndim)), axis=0), timestep)
