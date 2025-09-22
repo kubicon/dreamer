@@ -73,8 +73,8 @@ def extract_model_policy(model: RNaDDreamer)-> tuple[list, list]:
   def _tree_walk(game_states: GameState, legals_non_padded: jax.Array, depth=0):
      # Denoting this as A(D)
     max_actions = max(game.depth_chance_outcomes(depth), game_actions)
-    print(f"Handling depth {depth} with max action {max_actions}")
-    print(f"Num states: {legals_non_padded.shape[1]}")
+    # print(f"Handling depth {depth} with max action {max_actions}")
+    # print(f"Num states: {legals_non_padded.shape[1]}")
 
     legals = np.pad(legals_non_padded, ((0, 0), (0, 0), (0, max_actions - legals_non_padded.shape[-1])), constant_values=0)
     is_chance = vectorized_is_chance(game_states)
@@ -160,17 +160,18 @@ def policy_expected_value(game: JaxGame, policy: tuple[list, list], eps=1e-5):
   """Computes expected return for all players while following given
   policy, represented as per depth iset map and per depth behaviorals for
   each iset. We operate with two player zero sum games, so will return
-  p1_val, p2_val, where p2_val = -p1_val."""
+  p1_val, p2_val, where p2_val = -p1_val. FIXME: Reports wrong value 
+  for leduc nash (the difference is roughly -0.08 real vs -0.0004 reported.
+  Check why that happens!)."""
   num_players = game.num_players()
   num_actions = game.num_distinct_actions()
   iset_map, behaviorals = policy
   expected_return = 0
   #TODO: Think on how to vectorize this from DFS to BFS
-  def _tree_walk(game_state: GameState, terminal, returns, reaches: np.ndarray, depth=0):
-    if np.prod(reaches) <= 1e-5:
-      return
+  def _tree_walk(game_state: GameState, terminal, returns, log_reaches: np.ndarray, depth=0):
     if terminal:
       nonlocal expected_return
+      reaches = np.exp(log_reaches)
       reach_weighted_return = returns * np.prod(reaches)
       expected_return +=  reach_weighted_return
       return
@@ -182,9 +183,8 @@ def policy_expected_value(game: JaxGame, policy: tuple[list, list], eps=1e-5):
       for i, next_legal in enumerate(next_legals):
         next_state = jax.tree_util.tree_map(lambda x: x[i], next_game_states)
         #The chance reaches are last in reaches
-        next_reaches = reaches
-        next_reaches[-1] *= next_probs[i]
-        _tree_walk(next_state, next_terminal[i], returns + next_rewards[i], next_reaches, depth= depth + 1)
+        next_log_reaches = log_reaches + np.asarray((0, 0, np.log(next_probs[i])))
+        _tree_walk(next_state, next_terminal[i], returns + next_rewards[i], next_log_reaches, depth= depth + 1)
       return
 
     _, p1_iset, p2_iset, _ = game.get_info(game_state)
@@ -199,17 +199,18 @@ def policy_expected_value(game: JaxGame, policy: tuple[list, list], eps=1e-5):
         continue
       joint_pi.append(behaviorals[depth][pl][idx])
     joint_pi = np.asarray(joint_pi)
-    reachable_mask = joint_pi >= eps
+    player_reaches = np.exp(log_reaches[:-1])
+    reachable_mask = player_reaches[..., None] * joint_pi >= eps
     actions = np.tile(np.arange(joint_pi.shape[-1]), (num_players,1)).reshape(joint_pi.shape)
     valid_actions = [actions[i][reachable_mask[i]] for i in range(num_players)]
     joint_actions = cartesian_product(*valid_actions)
     for a in joint_actions:
       both_reaches = np.take_along_axis(joint_pi, a[..., None], axis=-1).flatten()
-      next_reaches = reaches * np.concatenate([both_reaches, np.ones(1)], axis=0)
+      next_log_reaches = log_reaches + np.log(np.concatenate([both_reaches, np.ones(1)], axis=0))
       next_state, next_terminal, next_rewards, next_legals = game.apply_action(game_state, a)
-      _tree_walk(next_state, next_terminal, returns + next_rewards, next_reaches, depth=depth+1)
+      _tree_walk(next_state, next_terminal, returns + next_rewards, next_log_reaches, depth=depth+1)
   init_state, init_legals = game.initialize_structures()
-  _tree_walk(init_state, False, 0, np.ones(num_players + 1))
+  _tree_walk(init_state, False, 0, np.zeros(num_players + 1))
   return expected_return, -expected_return
 
 def compare_policies(game: JaxGame, given_pols: tuple[list, list], ref_pols: tuple[list, list], eps=0.05):
@@ -217,9 +218,7 @@ def compare_policies(game: JaxGame, given_pols: tuple[list, list], ref_pols: tup
   Usually used to compare learned model policy with some reference policy.
   Assumes a two player game. Policies are expected to
   be supplied as a tuple of per depth iset map and per depth
-  behavior policies. FIXME: Reports wrong value 
-  for leduc nash (the difference is roughly -0.08 real vs -0.0004 reported.
-  Check why that happens!)."""
+  behavior policies."""
   num_players = game.num_players()
   num_actions = game.num_distinct_actions()
   given_map, given_behaviorals = given_pols
@@ -503,8 +502,12 @@ def test_loaded(args):
 
   model = load_model(model_path)
   assert isinstance(model, RNaDDreamer), f"Loaded model should be an instance of RNaDDreamer not {model.__class__}"
+  #The JAX version of Leduc divides all rewards by the max
+  # bet amount 13, but the saved values do not account for it. Just rescale it for correspondence
+  scale_factor = 13 if model.world_model.game.game_name() == "leduc" else 1
   #model_walk_deterministic(model)
   p2_br_val, p1_br_val, p1_br, p2_br = model_best_response(model)
+  p1_br_val, p2_br_val = scale_factor * p1_br_val, scale_factor * p2_br_val
   print(f"P2 best response value against p1: {p2_br_val}")
   print(f"P1 best response value against p2 {p1_br_val}")
   #breakpoint()
@@ -520,8 +523,11 @@ def test_retrain(args):
 
   model = load_model(model_path)
   assert isinstance(model, RNaDDreamer), f"Loaded model should be an instance of RNaDDreamer not {model.__class__}"
+  #The JAX version of Leduc divides all rewards by the max
+  # bet amount 13, but the saved values do not account for it. Just rescale it for correspondence
+  scale_factor = 13 if model.world_model.game.game_name() == "leduc" else 1
   config = model.config
-  neurd_steps = 600
+  neurd_steps = 100
   after_init_step_multiplier = 4
   init_policy_steps = 10
   new_config = RNaDConfig(
@@ -555,14 +561,22 @@ def test_retrain(args):
   )
   p1_exploitabilities = []
   p2_exploitabilities = []
+  print(f"Config {config}")
   clean_model = RNaDDreamer(model.world_model, new_config)
+  print(f"Step {clean_model.learner_steps}")
+  print(f"Policy switch step {clean_model.policy_switch_steps}")
+  p2_br_val, p1_br_val, p1_br, p2_br = model_best_response(clean_model)
+  p1_br_val, p2_br_val = scale_factor * p1_br_val, scale_factor * p2_br_val
+  print(f"P2 best response value against p1: {p2_br_val}")
+  print(f"P1 best response value against p2 {p1_br_val}")
   for i in range(init_policy_steps):
     for j in range(neurd_steps):
        clean_model.step()
-    # print(f"Step {clean_model.learner_steps}")
-    # print(f"Policy switch step {clean_model.policy_switch_steps}")
+    print(f"Step {clean_model.learner_steps}")
+    print(f"Policy switch step {clean_model.policy_switch_steps}")
     #model_walk_deterministic(clean_model, seed)
     p2_br_val, p1_br_val, p1_br, p2_br = model_best_response(clean_model)
+    p1_br_val, p2_br_val = scale_factor * p1_br_val, scale_factor * p2_br_val
     print(f"P2 best response value against p1: {p2_br_val}")
     print(f"P1 best response value against p2 {p1_br_val}")
     p1_exploitabilities.append(p2_br_val)
@@ -595,16 +609,22 @@ def test_nash(args, saved_nash_path: str):
 
   model = load_model(model_path)
   assert isinstance(model, RNaDDreamer), f"Loaded model should be an instance of RNaDDreamer not {model.__class__}"
+  #The JAX version of Leduc divides all rewards by the max
+  # bet amount 13, but the saved values do not account for it. Just rescale it for correspondence
+  scale_factor = 13 if model.world_model.game.game_name() == "leduc" else 1
   p1_nash_val, p2_nash_val, nash_iset_map, nash_behaviorals = load_model(nash_path)
   print(f"Loaded nash policies of game with game value {p1_nash_val} (from player 1 perspective)")
   model_map, model_behaviorals = extract_model_policy(model)
-  found_p1_nash, found_p2_nash = policy_expected_value(model.world_model.game, (nash_iset_map, nash_behaviorals))
+  found_p1_nash, found_p2_nash = policy_expected_value(model.world_model.game, (nash_iset_map, nash_behaviorals), eps=1e-5)
+  found_p1_nash, found_p2_nash = scale_factor * found_p1_nash, scale_factor * found_p2_nash
   print(f"Found nash values: {found_p1_nash} {found_p2_nash}")
   assert np.isclose(found_p1_nash, p1_nash_val, atol=1e-5), f"Found nash value {found_p1_nash} and saved nash value {p1_nash_val} for player 1 differ!"
   assert np.isclose(found_p1_nash, p1_nash_val, atol=1e-5), f"Found nash value {found_p2_nash} and saved nash value {p2_nash_val} for player 2 differ!"
   model_p1_val, model_p2_val = policy_expected_value(model.world_model.game, (model_map, model_behaviorals))
+  model_p1_val, model_p2_val = scale_factor * model_p1_val, scale_factor * model_p2_val
   print(f"Model values {model_p1_val}, {model_p2_val}")
-  p2_br_val, p1_br_val, p1_br, p2_br = model_best_response(model, (model_map, model_behaviorals))
+  p2_br_val, p1_br_val, p1_br, p2_br = model_best_response(model)
+  p1_br_val, p2_br_val = scale_factor * p1_br_val, scale_factor * p2_br_val
   print(f"P2 best response value against p1: {p2_br_val}")
   print(f"P1 best response value against p2 {p1_br_val}")
   #compare_policies(model.world_model.game, (model_map, model_behaviorals), (nash_iset_map, nash_behaviorals))
@@ -614,8 +634,8 @@ def test_nash(args, saved_nash_path: str):
 def main():
   args = parser.parse_args()
   #test_retrain(args)
-  #test_loaded(args)
-  test_nash(args, saved_nash_path="experiments/leduc_nash.pkl")
+  test_loaded(args)
+  #test_nash(args, saved_nash_path="experiments/leduc_nash.pkl")
   
 
 if __name__ == "__main__":
