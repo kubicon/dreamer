@@ -55,6 +55,7 @@ def check_state_all_outcomes(model: Dreamer, carry: WalkCarry, eps: float, outco
       print(f"Predicted reward {pred_reward} differs from real reward {carry.reward} for outcome {comb} with probabilties {probs} by more than {eps}")
     if pred_terminal != carry.terminal:
       print(f"Predicted terminal {pred_terminal} does not match real terminal for outcome {comb} with probabilties {probs} {carry.terminal}")
+  #breakpoint()
 
 def check_state_one_outcome(model: Dreamer, carry: WalkCarry,  eps: float):
   """Check whether the given sampled deterministic state
@@ -73,6 +74,7 @@ def check_state_one_outcome(model: Dreamer, carry: WalkCarry,  eps: float):
     print(f"Predicted reward {pred_reward} differs from real reward {carry.reward} by more than {eps}.")
   if pred_terminal != carry.terminal:
     print(f"Predicted terminal {pred_terminal} does not match real terminal {carry.terminal}.")
+  #breakpoint()
 
 def main():
   args = parser.parse_args()

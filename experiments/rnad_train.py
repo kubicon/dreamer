@@ -1,4 +1,3 @@
-from argparse import ArgumentParser
 import numpy as np
 import os
 
@@ -7,52 +6,8 @@ from dreamer_ma import DreamerMA
 from rnad_dreamer import RNaDConfig, RNaDDreamer
 
 
-parser = ArgumentParser()
-##RNaD parameters  
-parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training")
-parser.add_argument("--learning_rate", type=float, default=3e-4, help="Learning rate for the optimizer")
-parser.add_argument("--target_network_update", type=float, default=1e-3, help="Update rate for target network")
-parser.add_argument("--network_seed", type=int, default=-1, help="Random seed for network initialization")
-parser.add_argument("--trajectory_seed", type=int, default=-1, help="Random seed for trajectory generation")
-parser.add_argument("--eta", type=float, default=0.2, help="Strenght of the regularization in RNaD. Used for the reward transformation and the KL regularization for V-trace.")
-parser.add_argument("--vtrace_eta", type=float, default=0.2, help="Strenght of the additional KL regularization term in V-trace.")
-parser.add_argument("--sampling_epsilon", type=float, default=0.0, help="Defines mix of uniform policy to the network learned policy during trajectory sampling.")
-parser.add_argument("--state_sample_threshold", type=float, default=0.05, help="Threshold for the stochastic state sampling. If the probability of a class is below this threshold, it is not sampled.")
-parser.add_argument("--use_learned_model", type=bool, default=False, help="Whether to use the Dreamer learned model for trajectory sampling. If not, trajectories are sampled from the game. Just for debugging.")
-
-##Entropy schedule- network switching
-parser.add_argument("--entropy_schedule_size", default=(100,), help="Defines how many iterations should be done for each item in the sequence.")
-parser.add_argument("--entropy_schedule_repeats", default=(1,), help="Defines amount of network switching sequences for each item in the sequence. Make sure last element is 1. For details see the EntropySchedule class.")
-
-##V-Trace paraemters
-parser.add_argument("--rho_vtrace", type=float, default=1.0, help="Rho clipping parameter for V-Trace")
-parser.add_argument("--c_vtrace", type=float, default=1.0, help="C clipping parameter for V-Trace")
-parser.add_argument("--gamma_vtrace", type=float, default=1.0, help="Discount factor for V-Trace")
-parser.add_argument("--lambda_vtrace", type=float, default=1.0, help="Lambda parameter for V-Trace")
-
-
-##NeuRD parameters
-parser.add_argument("--neurd_clip", type=float, default=10000, help="Clip parameter for NeuRD")
-parser.add_argument("--neurd_threshold", type=float, default=2, help="Threshold parameter for NeuRD")
-
-##Network layer parameters
-parser.add_argument("--network_hidden_size", type=int, default=256, help="Size of the hidden layer in the RNaD network")
-parser.add_argument("--network_hidden_layers", type=int, default=1, help="Number of stacked hidden layers in the RNaD network")
-
-
-## World model path
-parser.add_argument("--dreamer_path", type=str, default="trained_networks/dreamer/goofspiel_3/seed99/network_seed99", help="Path to where is the saved Dreamer trained world model") 
-parser.add_argument("--model_restore_step", type=int, default=1000, help="Which saved step of the Dreamer world model to restore.")
-
-## Training parameters
-parser.add_argument("--num_steps", type=int, default=1001, help="Number of training steps")
-parser.add_argument("--save_each", type=int, default=100, help="Save model every N steps")
-parser.add_argument("--print_each", type=int, default=100, help="Print loss every N steps")
-parser.add_argument("--model_save_dir", type=str, default="", help="Directory to save the trained model")
-
-def main():
+def train_rnad(args):
   #profiler = Profiler()
-  args = parser.parse_args()
   network_seed = args.network_seed
   trajectory_seed = args.trajectory_seed
   if network_seed == -1:
@@ -90,7 +45,7 @@ def main():
       learning_rate = args.learning_rate,
       network_seed = args.network_seed
   )
-  saved_model_dir = args.dreamer_path
+  saved_model_dir = args.dreamer_dir
   if not saved_model_dir.startswith("/"):
     saved_model_dir = os.getcwd() + "/" + saved_model_dir
   saved_model_dir = saved_model_dir + f"/step_{args.model_restore_step}.pkl"
@@ -113,6 +68,3 @@ def main():
       dreamer_model= world_model
   )
   model.train_model(model_save_dir, args.num_steps, args.print_each, args.save_each)
-
-if __name__ == "__main__":
-  main()

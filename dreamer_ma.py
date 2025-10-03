@@ -12,6 +12,15 @@ from networks import initialize_ma_dreamer_optimizers, DreamerMAOptimizers, Sequ
 from games.jax_game import JaxGame, GameState
 
 
+@chex.dataclass(frozen=True)
+class DreamerMAGradients():
+  sequence: nnx.State
+  encoder: nnx.State
+  p1_decoder: nnx.State
+  p2_decoder: nnx.State
+  dynamics: nnx.State
+  predictor: nnx.State
+  legal_predictor: nnx.State
 
 
 class DreamerMA():
@@ -227,7 +236,7 @@ class DreamerMA():
       l_pred += get_loss_mean_with_mask(reward_loss, timestep.valid[..., None])
 
       #Using free bits to clip dynamics and representation losses
-      # to 1, thus disabling their gradient when they are below 1
+      # thus disabling their gradient when they are below free_bits_clip_threshold
       #[Trajectory, Batch, encoded_categories, encoded_classes]
 
       posterior = nnx.softmax(predictions.repr_state, axis=-1)
@@ -240,7 +249,7 @@ class DreamerMA():
       #[Trajectory, Batch]
       repr_loss = kl_divergence(posterior, jax.lax.stop_gradient(prior))
       l_rep += jnp.maximum(self.config.free_bits_clip_threshold, get_loss_mean_with_mask(repr_loss, timestep.valid))
-
+      #jax.debug.breakpoint()
 
       return self.config.beta_prediction * l_pred + self.config.beta_dynamics * l_dyn + self.config.beta_representation * l_rep
   
@@ -257,6 +266,19 @@ class DreamerMA():
     optimizers.legal_actions_optimizer.update(grad[6])
     
     return loss
+  
+
+  @partial(nnx.jit, static_argnums=(0))
+  def update_optimizers_with_grads(self, optimizers: DreamerMAOptimizers, grad: DreamerMAGradients):
+    """Update the world model with the computed grad dictionary.
+    """
+    optimizers.sequence_optimizer.update(grad.sequence)
+    optimizers.encoder_optimizer.update(grad.encoder)
+    optimizers.p1_decoder_optimizer.update(grad.p1_decoder)
+    optimizers.p2_decoder_optimizer.update(grad.p2_decoder)
+    optimizers.dynamics_optimizer.update(grad.dynamics)
+    optimizers.predictor_optimizer.update(grad.predictor)
+    optimizers.legal_actions_optimizer.update(grad.legal_predictor) 
   
   
   # Unlike flax.linen, nnx.jit allows updating the model itself.

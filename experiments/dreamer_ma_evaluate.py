@@ -59,6 +59,7 @@ def check_state_all_outcomes(model: DreamerMA, carry: WalkCarry,  eps: float, ou
       print(f"Predicted legal actions {pred_legal} do not match real legal actions {carry.legals} for outcome {comb} with probabilties {probs}.")
     if pred_terminal != carry.terminal:
       print(f"Predicted terminal {pred_terminal} does not match real terminal {carry.terminal} for outcome {comb} with probabilties {probs}. ")
+  #breakpoint()
 
 def check_state_one_outcome(model: DreamerMA, carry:WalkCarry, eps:float):
   """Check whether the best fitting deterministic state for the state
@@ -67,7 +68,7 @@ def check_state_one_outcome(model: DreamerMA, carry:WalkCarry, eps:float):
   _, real_p1_iset, real_p2_iset, _ = model.game.get_info(carry.game_state)
   p1_decoded_iset = model.get_decoder(model.optimizers.p1_decoder_optimizer.model, carry.hidden_state, carry.deter_state)
   p2_decoded_iset = model.get_decoder(model.optimizers.p2_decoder_optimizer.model, carry.hidden_state, carry.deter_state)
-  pred_reward, pred_terminal, pred_legal = model.get_predictor(model.optimizers.predictor_optimizer.model, model.optimizers.legal_actions_optimizer.model, carry.hidden_state, sampled_deter)
+  pred_reward, pred_terminal, pred_legal = model.get_predictor(model.optimizers.predictor_optimizer.model, model.optimizers.legal_actions_optimizer.model, carry.hidden_state, carry.deter_state)
   p1_iset_max_difference = jnp.max(jnp.abs(real_p1_iset - p1_decoded_iset))
   p2_iset_max_difference = jnp.max(jnp.abs(real_p2_iset - p2_decoded_iset))
   if p1_iset_max_difference >= eps:
@@ -83,6 +84,7 @@ def check_state_one_outcome(model: DreamerMA, carry:WalkCarry, eps:float):
     print(f"Predicted legal actions {pred_legal} do not match real legal actions {carry.legals}.")
   if pred_terminal != carry.terminal:
     print(f"Predicted terminal {pred_terminal} does not match real terminal {carry.terminal}. ")
+  #breakpoint()
 
 def main():
   args = parser.parse_args()

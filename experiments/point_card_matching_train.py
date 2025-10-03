@@ -1,11 +1,11 @@
 from argparse import ArgumentParser
 
 from games.point_card_matching import PointCardMatching, PointCardMatchingStochastic
+from experiments.parsing_utils import prepare_experiment_parser
 
-from experiments.train_dreamer import train_model, create_dreamer_parser
+from experiments.train_dreamer import train_model
 
-
-parser = create_dreamer_parser(multi_agent=False)
+parser = prepare_experiment_parser(multi_agent=False)
 # Game parameters
 parser.add_argument("--num_cards", type=int, default=3, help="Number of cards of the game. Should be at least 3")
 parser.add_argument("--stochastic", type=bool, default=False, help="Whether to use the point card matching with chance node, or the one without.")

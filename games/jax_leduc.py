@@ -349,7 +349,7 @@ def main():
       outcomes,  probs = game.get_outcomes_and_probs(state)
       # print(f"Next states: {next_states}")
       # print(f"Probs: {probs}")
-      for outcome, prob in enumerate(outcomes, probs):
+      for outcome, prob in zip(outcomes, probs):
         if prob < 1e-5:
           continue
         new_state, new_terminal, reward, new_legals = game.apply_action(state, outcome)
@@ -365,7 +365,6 @@ def main():
         new_state, new_terminal, reward, new_legals = game.apply_action(state, joint_action)
         _tree_walk(new_state, new_legals, new_terminal, depth = depth + 1)
   init_state, init_legals = game.initialize_structures()
-  #game.generate_all_public_card_nodes(init_state)
   _tree_walk(init_state, init_legals, False)
 
 if __name__ == "__main__":

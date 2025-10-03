@@ -634,8 +634,8 @@ def test_nash(args, saved_nash_path: str):
 def main():
   args = parser.parse_args()
   #test_retrain(args)
-  test_loaded(args)
-  #test_nash(args, saved_nash_path="experiments/leduc_nash.pkl")
+  #test_loaded(args)
+  test_nash(args, saved_nash_path="experiments/goofspiel_nash.pkl")
   
 
 if __name__ == "__main__":

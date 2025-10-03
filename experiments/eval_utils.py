@@ -28,7 +28,7 @@ def check_outcomes(stoch_state: chex.Array, is_chance:bool, num_chance_outcomes:
   Returns either the deterministic state corresponding to the max probability outcome (as 1 element list),
    or, in chance level a list of all deterministic states corresponding to the chance outcomes.
     TODO: This does not catch all cases. For example
-  for 4 outcomes [[0.5, 0.5], [0.5, 0.5]] would also be a valid learned result.
+  for 4 outcomes [[0.5, 0.5, 0, 0], [0.5, 0.5, 0, 0]] would also be a valid learned result.
   But, this assumes that the outcomes are encoded in one distribution and the rest
   are (almost) deterministic. 
   
@@ -43,7 +43,6 @@ def check_outcomes(stoch_state: chex.Array, is_chance:bool, num_chance_outcomes:
   chance_max_probs, chance_max_indices = jax.lax.top_k(stoch_state, num_chance_outcomes)
   chance_probs =  1 / num_chance_outcomes
   #Find the categorical that is closest to the uniform distribution
-  #TODO: 
   uniform_distance = jnp.sum((chance_max_probs - chance_probs) ** 2, axis=-1)
   chance_dist_idx = jnp.argmin(uniform_distance)
   uniform_categorical = chance_max_probs[chance_dist_idx, :]
@@ -105,6 +104,9 @@ def get_closest_deter_ma(model: DreamerMA, hidden_state, deters, state: GameStat
 
 @partial(jax.jit, static_argnums=(0, 2))
 def unroll_chance_node(game: JaxGame, game_state: GameState, num_chance_outcomes:int):
+  """Unroll a state that is a chance node, into its outcomes.
+  Returns next_states, next_terminal, rewards, next_legals, next_probs
+  corresponding to the outcomes and stacked to have shape of [num_chance_outcomes, ...]"""
   outcomes, probs = game.get_outcomes_and_probs(game_state)
   vectorized_apply = jax.vmap(game.apply_action, in_axes=(None, 0), out_axes=(0, 0, 0, 0))
   next_states, next_terminal, rewards, next_legal = vectorized_apply(game_state, outcomes)
@@ -214,6 +216,12 @@ def model_walk_test(model:Dreamer|DreamerMA,
   get_closest_deter_fn = get_closest_deter_ma if is_ma else get_closest_deter
   num_players = model.game.num_players()
 
+  def get_stoch_from_prediction(logits: chex.Array):
+    stoch_unfiltered = np.asarray(jax.nn.softmax(logits, axis=-1))
+    stoch_unnormalized = stoch_unfiltered * (stoch_unfiltered >= probability_threshold)
+    stoch = stoch_unnormalized / np.sum(stoch_unnormalized, axis=-1, keepdims=True)
+    return stoch
+
   def _tree_walk(carry: WalkCarry, depth=0):
     
     if carry.after_chance:
@@ -235,7 +243,7 @@ def model_walk_test(model:Dreamer|DreamerMA,
       ai_oh = jax.nn.one_hot(a, carry.legals.shape[-1])
       gru_input = jnp.concatenate([carry.deter_state.ravel(), ai_oh.ravel()], axis=0)
       next_hidden = model.optimizers.sequence_optimizer.model(carry.hidden_state, gru_input)
-      next_stoch_state = jax.nn.softmax(model.optimizers.dynamics_optimizer.model(next_hidden), axis=-1)
+      next_stoch_state = get_stoch_from_prediction(model.optimizers.dynamics_optimizer.model(next_hidden))
             
       is_chance = model.game.is_chance(next_state)
       chance_outcomes = model.game.depth_chance_valid_outcomes(depth + 1)
@@ -253,7 +261,7 @@ def model_walk_test(model:Dreamer|DreamerMA,
           next_reward = next_rewards[i]
           next_legal = next_legals[i]
           next_state = jax.tree_util.tree_map(lambda x: x[i], next_states)
-          closest_deter = get_closest_deter_fn(model, carry.hidden_state, next_deters, next_state)
+          closest_deter = get_closest_deter_fn(model, next_hidden, next_deters, next_state)
           new_carry = WalkCarry(legals= next_legal,
                                 game_state = next_state,
                                 hidden_state= next_hidden,
@@ -281,13 +289,14 @@ def model_walk_test(model:Dreamer|DreamerMA,
   init_chance =  model.game.is_chance(init_state)
   if init_chance:
     chance_outcomes = model.game.depth_chance_valid_outcomes(0)
-    next_states, next_terminals, next_rewards, next_legals, next_probs = unroll_chance_node(model.game, next_state, chance_outcomes)
+    next_states, next_terminals, next_rewards, next_legals, next_probs = unroll_chance_node(model.game, init_state, chance_outcomes)
         
 
     next_terminals = np.asarray(next_terminals)
     next_rewards = np.asarray(next_rewards)
     next_legals = np.asarray(next_legals)
-      
+    stoch_states = []
+    deters = []
     for i in range(next_terminals.shape[0]):
       next_terminal = next_terminals[i]
       next_reward = next_rewards[i]
@@ -299,9 +308,10 @@ def model_walk_test(model:Dreamer|DreamerMA,
       # beloning to the outcome.
       # The first prediction is posterior, so each outcome has its own stochastic state
       # because they are differentiated by the observations.
-      init_obs = get_obs_fn(init_state)
-      init_stoch_state = jax.nn.softmax(model.optimizers.encoder_optimizer.model(init_hidden, init_obs))
-      init_deter = check_outcomes(init_stoch_state, False, model.game.depth_chance_valid_outcomes(0), probability_eps)[0]
+      init_obs = get_obs_fn(next_state)
+      print(f"Init obs for outcome {i}, is {init_obs}")
+      init_stoch_state = get_stoch_from_prediction(model.optimizers.encoder_optimizer.model(init_hidden, init_obs))
+      init_deter = check_outcomes(init_stoch_state, False, chance_outcomes, probability_eps)[0]
       init_carry = WalkCarry(legals= next_legal,
                             game_state = next_state,
                             hidden_state= init_hidden,
@@ -309,11 +319,14 @@ def model_walk_test(model:Dreamer|DreamerMA,
                             deter_state=init_deter,
                             reward=next_reward,
                             terminal=next_terminal,
-                            after_chance=init_chance) 
+                            after_chance=init_chance)
+      stoch_states.append(init_stoch_state)
+      deters.append(init_deter)
       _tree_walk(init_carry, depth=1)
+    breakpoint()
     return
   init_obs = get_obs_fn(init_state)
-  init_stoch_state = jax.nn.softmax(model.optimizers.encoder_optimizer.model(init_hidden, init_obs))
+  init_stoch_state = get_stoch_from_prediction(model.optimizers.encoder_optimizer.model(init_hidden, init_obs))
   init_deter = check_outcomes(init_stoch_state, False, model.game.depth_chance_valid_outcomes(0), probability_eps)[0]
   init_carry = WalkCarry(legals= init_legals,
                             game_state = init_state,
