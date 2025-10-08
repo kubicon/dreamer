@@ -245,13 +245,10 @@ class DreamerMA():
       prior = nnx.softmax(predictions.dynamics_state, axis=-1)
       #[Trajectory, Batch]
       dynamics_loss = kl_divergence(jax.lax.stop_gradient(posterior), prior)
-      #dynamics_loss =  kl_divergence(jax.lax.stop_gradient(posterior), prior)
-      #dynamics_mask = jnp.logical_and(timestep.valid, jnp.logical_not(timestep.terminal))
       l_dyn += jnp.maximum(self.config.free_bits_clip_threshold, get_loss_mean_with_mask(dynamics_loss, timestep.valid))
       #[Trajectory, Batch]
       repr_loss = kl_divergence(posterior, jax.lax.stop_gradient(prior))
       l_rep += jnp.maximum(self.config.free_bits_clip_threshold, get_loss_mean_with_mask(repr_loss, timestep.valid))
-      #jax.debug.breakpoint()
 
       return self.config.beta_prediction * l_pred + self.config.beta_dynamics * l_dyn + self.config.beta_representation * l_rep
   
@@ -270,7 +267,6 @@ class DreamerMA():
     return loss
   
 
-  @chex.assert_max_traces(n=1)
   @partial(nnx.jit, static_argnums=(0))
   def update_optimizers_with_grads(self, optimizers: DreamerMAOptimizers, grad: DreamerMAGradients):
     """Update the world model with the computed grad dictionary.
@@ -285,7 +281,6 @@ class DreamerMA():
   
   
   # Unlike flax.linen, nnx.jit allows updating the model itself.
-  @chex.assert_max_traces(n=1)
   @partial(nnx.jit, static_argnums=(0))
   def world_model_train(self, optimizers, rng_key):
     trajectory_key, train_key = jax.random.split(rng_key)
@@ -320,7 +315,6 @@ class DreamerMA():
     
 
   def update_nnx(self, model_state, saved_state):
-    #breakpoint()  
     static_graph, _ = nnx.split(model_state)
     new_model_state = nnx.merge(static_graph, saved_state)
     return new_model_state
@@ -334,7 +328,6 @@ class DreamerMA():
     self.jax_rngs = state["jax_rngs"]
     self.optimizers = self.update_nnx(self.optimizers, state["optimizers"])
 
-  @chex.assert_max_traces(n=1)
   @partial(nnx.jit, static_argnums=(0, 5, 6))
   def get_predictor(self, predictor_model: Predictor, legal_model: LegalActionsNetwork, 
                     hidden_state: chex.Array, deterministic_state:chex.Array, terminal_threshold: float = 0.5, legal_threshold: float = 0.5):
@@ -365,7 +358,6 @@ class DreamerMA():
     legal_actions = legal_prob >= legal_threshold
     return reward, terminal[0], legal_actions
   
-  @chex.assert_max_traces(n=1)
   @partial(nnx.jit, static_argnums=(0))
   def get_decoder(self, decoder_model: IsetDecoder, hidden_state: chex.Array, deterministic_state: chex.Array):
     """Calls the decoder network and 
@@ -377,17 +369,14 @@ class DreamerMA():
     decoder_output = decoder_output_untransformed
     return decoder_output
   
-  @chex.assert_max_traces(n=1)
   @partial(nnx.jit, static_argnums=(0))
   def get_dynamics(self, dynamics_model: DynamicsPredictor, hidden_state:chex.Array):
     return dynamics_model(hidden_state)
   
-  @chex.assert_max_traces(n=1)
   @partial(nnx.jit, static_argnums=(0))
   def get_encoder(self, encoder_model:JointIsetEncoder, hidden_state:chex.Array, obs: chex.Array):
     return encoder_model(hidden_state, obs)
   
-  @chex.assert_max_traces(n=1)
   @partial(nnx.jit, static_argnums=(0))
   def get_next_hidden(self, sequence_model:SequenceModel, hidden_state:chex.Array, deterministic_state:chex.Array, joint_action:chex.Array):
     flattened_action = jnp.reshape(joint_action, (*deterministic_state.shape[:-2], -1))

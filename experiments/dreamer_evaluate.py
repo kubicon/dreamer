@@ -131,9 +131,6 @@ def main():
   sorted_mistake_probs = all_mistake_probs[sort_indices]
   sorted_steps = steps[sort_indices]
   sorted_dist_mismatch_probs = distribution_mismatch_probs[sort_indices]
-  # step_sorted_data = [(data, step) for step, data in sorted(zip(steps, all_mistake_probs), key= lambda pair: pair[0])]
-  # sorted_mistake_probs, sorted_steps = zip(*step_sorted_data)
-  # sorted_mistake_probs, sorted_steps = np.asarray(sorted_mistake_probs), np.asarray(sorted_steps)
   fig, ax = plt.subplots()
   ax.plot(sorted_steps, sorted_dist_mismatch_probs, label="Mismatch of learned and real state distribution.")
   ax.plot(sorted_steps, sorted_mistake_probs[:, 0], label="Observation")

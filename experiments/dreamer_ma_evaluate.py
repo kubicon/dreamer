@@ -168,9 +168,6 @@ def main():
       #model.optimizers = model.update_nnx(model.optimizers, nnx.split(temp_model.optimizers)[1])
 
     print(f"Restored model from {model_path}", file=sys.stderr)
-    # A big complex function. The return array is a numpy
-    # array, but the model used is flax.nnx module. Dont have anything to
-    # call block until ready on.
     mistake_probs, distribution_mismatch_prob = model_walk_test(model,
                     all_outcome_check_fn = check_state_all_outcomes,
                     one_outcome_check_fn = check_state_one_outcome)
@@ -178,12 +175,12 @@ def main():
     steps.append(step)
     distribution_mismatch_probs.append(distribution_mismatch_prob)
     #print(f"Mistake probs {mistake_probs}")
-    print(f"Distribution mismatch average probability {distribution_mismatch_prob}")
-    print(f"Player 1 iset average mistake probability {mistake_probs[0]}")
-    print(f"Player 2 iset average mistake probability {mistake_probs[1]}")
-    print(f"Terminal average mistake probability {mistake_probs[2]}")
-    print(f"Reward average mistake probability {mistake_probs[3]}")
-    print(f"Legal actions average mistake probability {mistake_probs[4]}")
+    # print(f"Distribution mismatch average probability {distribution_mismatch_prob}")
+    # print(f"Player 1 iset average mistake probability {mistake_probs[0]}")
+    # print(f"Player 2 iset average mistake probability {mistake_probs[1]}")
+    # print(f"Terminal average mistake probability {mistake_probs[2]}")
+    # print(f"Reward average mistake probability {mistake_probs[3]}")
+    # print(f"Legal actions average mistake probability {mistake_probs[4]}")
   print("Ended evaluation")
   print(f"Evaluation took {time.time() - start_time:.2f} seconds.")
   #profiler.stop()
@@ -200,9 +197,6 @@ def main():
   sorted_steps = steps[sort_indices]
   sorted_dist_mismatch_probs = distribution_mismatch_probs[sort_indices]
 
-  #step_sorted_data = [(data, step) for step, data in sorted(zip(steps, all_mistake_probs), key= lambda pair: pair[0])]
-  #sorted_mistake_probs, sorted_steps = zip(*step_sorted_data)
-  #sorted_mistake_probs, sorted_steps = np.asarray(sorted_mistake_probs), np.asarray(sorted_steps)
   fig, ax = plt.subplots()
   ax.plot(sorted_steps, sorted_dist_mismatch_probs, label="Mismatch of learned and real state distribution.")
   ax.plot(sorted_steps, sorted_mistake_probs[:, 0], label="Player 1 iset")
