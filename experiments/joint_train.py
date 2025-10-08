@@ -49,6 +49,7 @@ def joint_train_loop(args, game:JaxGame, ):
       batch_size=args.rnad_batch_size,
       seed=rnad_trajectory_seed,
       use_learned_model = args.use_learned_model,
+      send_signal_to_dreamer = True,
 
       eta=args.eta,
       vtrace_eta = args.vtrace_eta,
@@ -98,4 +99,4 @@ def joint_train_loop(args, game:JaxGame, ):
     for ds in range(args.dreamer_steps_each_step):
       dreamer_loss = dreamer_world_model.world_model_train_step()
     for rs in range(args.rnad_steps_each_step):
-      rnad_loss = rnad_model.step()
+      rnad_loss = rnad_model.step_with_model()

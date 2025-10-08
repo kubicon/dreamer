@@ -13,7 +13,7 @@ parser.add_argument("--stochastic", action="store_true", help="A flag whether to
 
 def main():
   args = parser.parse_args()
-  game = JaxStochasticRPS if args.stochastic else JaxRPS()
+  game = JaxStochasticRPS() if args.stochastic else JaxRPS()
   if args.train_mode == "dreamer":
     train_model_ma(args, game)
   elif args.train_mode == "rnad":

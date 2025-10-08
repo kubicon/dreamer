@@ -3,7 +3,7 @@ import chex
 import jax
 from flax import nnx
 import jax.numpy as jnp
-from train_utils import DreamerConfig, DreamerMAConfig
+from train_utils import DreamerConfig, DreamerMAConfig, RNaDConfig
 import optax
 from games.jax_game import JaxGame
 
@@ -268,6 +268,26 @@ class DreamerOptimizers():
   predictor_optimizer: nnx.Optimizer
 
 
+
+@chex.dataclass(frozen=True)
+class RNaDOptimizers():
+  rnad_optimizer: nnx.Optimizer
+  rnad_target_optimizer: nnx.Optimizer
+
+
+@chex.dataclass(frozen=True)
+class JointOptimizers():
+  sequence_optimizer: nnx.Optimizer
+  encoder_optimizer: nnx.Optimizer
+  p1_decoder_optimizer: nnx.Optimizer
+  p2_decoder_optimizer: nnx.Optimizer
+  dynamics_optimizer: nnx.Optimizer
+  predictor_optimizer: nnx.Optimizer
+  legal_actions_optimizer: nnx.Optimizer
+  rnad_optimizer: nnx.Optimizer
+  rnad_target_optimizer: nnx.Optimizer
+
+
 def initialize_ma_dreamer_optimizers(config: DreamerMAConfig, game: JaxGame, rngs: nnx.Rngs) -> DreamerMAOptimizers:
   """Initializes the model world model networks and optimizers.
   Multi agent version.""" 
@@ -456,3 +476,32 @@ def initialize_dreamer_optimizers(config: DreamerConfig, game: JaxGame, rngs: nn
   )
 
   return optims
+
+def initialize_rnad_optimizers(config: RNaDConfig, iset_size: int, actions: int, rngs: nnx.Rngs) ->RNaDOptimizers:
+  """Initializes optimizers for the main algorithm network and the target network for the RNaD algorithm."""
+  rnad_network = RNaDNetwork(iset_size, actions, config.rnad_network_details[0], config.rnad_network_details[1], rngs=rngs)
+  target_network = RNaDNetwork(iset_size, actions, config.rnad_network_details[0], config.rnad_network_details[1], rngs=rngs)
+  optimizer = nnx.Optimizer(model=rnad_network, tx= optax.chain(optax.adam(config.learning_rate, b1=0.0), optax.clip(100)))
+  optimizer_target = nnx.Optimizer(model=target_network, tx=optax.sgd(config.target_network_update))
+  rnad_optimizers = RNaDOptimizers(rnad_optimizer=optimizer,
+                                    rnad_target_optimizer = optimizer_target)
+  return rnad_optimizers
+
+
+def initialize_joint_optimizers(dreamer_optimizers: DreamerMAOptimizers, rnad_config: RNaDConfig, iset_size: int, actions: int, rnad_rngs: nnx.Rngs) ->JointOptimizers:
+  """Initializes optimizers for joint training. It is one module,
+  containing optimizers both for DreamerMA world model and RNaDDreamer actor.
+  Initializes the optimizers from the already given instance of DreamerOptimizers, using
+  reference sharing."""
+  rnad_optimizers = initialize_rnad_optimizers(rnad_config, iset_size, actions, rnad_rngs)
+
+  joint_optimizers = JointOptimizers(sequence_optimizer=dreamer_optimizers.sequence_optimizer,
+    encoder_optimizer=dreamer_optimizers.encoder_optimizer,
+    p1_decoder_optimizer=dreamer_optimizers.p1_decoder_optimizer,
+    p2_decoder_optimizer = dreamer_optimizers.p2_decoder_optimizer,
+    dynamics_optimizer=dreamer_optimizers.dynamics_optimizer,
+    predictor_optimizer=dreamer_optimizers.predictor_optimizer,
+    legal_actions_optimizer=dreamer_optimizers.legal_actions_optimizer,
+    rnad_optimizer = rnad_optimizers.rnad_optimizer,
+    rnad_target_optimizer = rnad_optimizers.rnad_target_optimizer)
+  return joint_optimizers

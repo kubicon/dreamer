@@ -32,10 +32,13 @@ def check_outcomes(stoch_state: chex.Array, is_chance:bool, num_chance_outcomes:
   But, this assumes that the outcomes are encoded in one distribution and the rest
   are (almost) deterministic. 
   
-  TODO: So far this assumes uniform distribution over the legal chance outcomes."""
+  TODO: So far this assumes uniform distribution over the legal chance outcomes. If we switch
+  to non-uniform, we should also check whether the correct outcome corresponds to the 
+  correct probability."""
   
   #repr_stoch_state = jax.nn.softmax(stoch_state, axis=-1)
 
+  distribution_mismatch = 0
   max_probs = jnp.max(stoch_state, axis=-1)
   max_indices = jnp.argmax(stoch_state, axis=-1)
   #repr_max_probs = jnp.max(repr_stoch_state, axis=-1)
@@ -50,13 +53,15 @@ def check_outcomes(stoch_state: chex.Array, is_chance:bool, num_chance_outcomes:
   #repr_two_max_probs, _ = jax.lax.top_k(repr_stoch_state, 2)
   if is_chance:
     if jnp.max(jnp.abs(chance_probs - uniform_categorical)) >= eps:
-      print(f"Stochastic state differs from a stochastic uniform by more than {eps}")
-      print(f"Stochastic state  max probs {uniform_categorical}")
-      #print(f"Represented (posterior) stochastic state two max probs {repr_two_max_probs}")
+      distribution_mismatch = 1
+  #     print(f"Stochastic state differs from a stochastic uniform by more than {eps}")
+  #     print(f"Stochastic state  max probs {uniform_categorical}")
+  #     #print(f"Represented (posterior) stochastic state two max probs {repr_two_max_probs}")
   else:
     if jnp.max(jnp.abs(1 - max_probs)) >= eps:
-      print(f"Stochastic state differs from deterministic more than {eps}")
-      print(f"Stochastic state max probs {max_probs}")
+      distribution_mismatch = 1
+  #     print(f"Stochastic state differs from deterministic more than {eps}")
+  #     print(f"Stochastic state max probs {max_probs}")
       #print(f"Represented (posterior) stochastic state max probs {repr_max_probs}")
 
   chance_max_dets = jax.nn.one_hot(uniform_categorical_indices, stoch_state.shape[-1], axis=-1)
@@ -64,7 +69,7 @@ def check_outcomes(stoch_state: chex.Array, is_chance:bool, num_chance_outcomes:
   def _make_det_from_chance(chance_det, chance_idx, argmax_state):
     return jnp.concatenate([argmax_state[:chance_idx, :], chance_det[None, ...], argmax_state[chance_idx + 1:, :]], axis=0)
   next_deters = [_make_det_from_chance(det, chance_dist_idx, deter_state) for det in chance_max_dets] if is_chance else [deter_state]
-  return next_deters
+  return next_deters, distribution_mismatch
 
 def get_closest_deter(model: Dreamer, hidden_state, deters, state: GameState):
   """Find the deterministic state of the possible outcomes that is the best fit
@@ -84,7 +89,7 @@ def get_closest_deter(model: Dreamer, hidden_state, deters, state: GameState):
 
 def get_closest_deter_ma(model: DreamerMA, hidden_state, deters, state: GameState):
   """Find the deterministic state of the possible outcomes that is the best fit
-  to the state based on decoder. Multi-agent version"""
+  to the state based on decoder. Multi-agent version."""
   if len(deters) == 1:
     return deters
   min_dist = np.inf
@@ -205,6 +210,9 @@ def model_walk_test(model:Dreamer|DreamerMA,
 
    Cannot handle more than 1 consecutive chance nodes (but note that 
    these can be represented as a single chance node.)
+   Returns a numpy array of statistics of probablity of mistakes averaged over the states.
+   For a single agent Dreamer ordered as obs_reconstruction, terminal, reward
+   And for a multi agent Dreamer as iset1_reconstruction, iset2_reconstruction, terminal, reward, legal_actions.
   """
   is_ma = model.__class__ is DreamerMA
   def get_single_obs(state: GameState):
@@ -215,6 +223,9 @@ def model_walk_test(model:Dreamer|DreamerMA,
   get_obs_fn = get_both_obs if is_ma else get_single_obs
   get_closest_deter_fn = get_closest_deter_ma if is_ma else get_closest_deter
   num_players = model.game.num_players()
+  mistake_cum_probs = 0
+  num_visited_states = 0
+  distribution_mismatches = 0
 
   def get_stoch_from_prediction(logits: chex.Array):
     stoch_unfiltered = np.asarray(jax.nn.softmax(logits, axis=-1))
@@ -223,11 +234,15 @@ def model_walk_test(model:Dreamer|DreamerMA,
     return stoch
 
   def _tree_walk(carry: WalkCarry, depth=0):
-    
+    nonlocal num_visited_states
+    nonlocal mistake_cum_probs
+    nonlocal distribution_mismatches
+    num_visited_states += 1
+    #print(f"Num visited states {num_visited_states}")
     if carry.after_chance:
-      one_outcome_check_fn(model, carry, difference_eps)
+      mistake_cum_probs  = mistake_cum_probs + one_outcome_check_fn(model, carry, difference_eps)
     else:
-      all_outcome_check_fn(model, carry, difference_eps, probability_threshold)
+      mistake_cum_probs = mistake_cum_probs + all_outcome_check_fn(model, carry, difference_eps, probability_threshold)
     if carry.terminal:
       return
     pi = np.asarray(get_reference_policy(carry.game_state, carry.legals))
@@ -241,13 +256,13 @@ def model_walk_test(model:Dreamer|DreamerMA,
     for a in joint_actions:
       next_state, next_terminal, next_reward, next_legals = model.game.apply_action(carry.game_state, a)
       ai_oh = jax.nn.one_hot(a, carry.legals.shape[-1])
-      gru_input = jnp.concatenate([carry.deter_state.ravel(), ai_oh.ravel()], axis=0)
-      next_hidden = model.optimizers.sequence_optimizer.model(carry.hidden_state, gru_input)
-      next_stoch_state = get_stoch_from_prediction(model.optimizers.dynamics_optimizer.model(next_hidden))
+      next_hidden = model.get_next_hidden(model.optimizers.sequence_optimizer.model, carry.hidden_state, carry.deter_state, ai_oh)
+      next_stoch_state = get_stoch_from_prediction(model.get_dynamics(model.optimizers.dynamics_optimizer.model, next_hidden))
             
       is_chance = model.game.is_chance(next_state)
       chance_outcomes = model.game.depth_chance_valid_outcomes(depth + 1)
-      next_deters = check_outcomes(next_stoch_state, is_chance, chance_outcomes, probability_eps) 
+      next_deters, dist_mismatch = check_outcomes(next_stoch_state, is_chance, chance_outcomes, probability_eps) 
+      distribution_mismatches = distribution_mismatches + dist_mismatch
       if is_chance:
         next_states, next_terminals, next_rewards, next_legals, next_probs = unroll_chance_node(model.game, next_state, chance_outcomes)
         
@@ -309,9 +324,11 @@ def model_walk_test(model:Dreamer|DreamerMA,
       # The first prediction is posterior, so each outcome has its own stochastic state
       # because they are differentiated by the observations.
       init_obs = get_obs_fn(next_state)
-      print(f"Init obs for outcome {i}, is {init_obs}")
-      init_stoch_state = get_stoch_from_prediction(model.optimizers.encoder_optimizer.model(init_hidden, init_obs))
-      init_deter = check_outcomes(init_stoch_state, False, chance_outcomes, probability_eps)[0]
+      #print(f"Init obs for outcome {i}, is {init_obs}")
+      init_stoch_state = get_stoch_from_prediction(model.get_encoder(model.optimizers.encoder_optimizer.model, init_hidden, init_obs))
+      init_deter, dist_mismatch = check_outcomes(init_stoch_state, False, chance_outcomes, probability_eps)
+      init_deter = init_deter[0]
+      distribution_mismatches += dist_mismatch
       init_carry = WalkCarry(legals= next_legal,
                             game_state = next_state,
                             hidden_state= init_hidden,
@@ -323,11 +340,14 @@ def model_walk_test(model:Dreamer|DreamerMA,
       stoch_states.append(init_stoch_state)
       deters.append(init_deter)
       _tree_walk(init_carry, depth=1)
-    breakpoint()
-    return
+    avg_mistake_probs = mistake_cum_probs / num_visited_states
+    avg_distribution_mismatches = distribution_mismatches / num_visited_states
+    return avg_mistake_probs, avg_distribution_mismatches
   init_obs = get_obs_fn(init_state)
-  init_stoch_state = get_stoch_from_prediction(model.optimizers.encoder_optimizer.model(init_hidden, init_obs))
-  init_deter = check_outcomes(init_stoch_state, False, model.game.depth_chance_valid_outcomes(0), probability_eps)[0]
+  init_stoch_state = get_stoch_from_prediction(model.get_encoder(model.optimizers.encoder_optimizer.model, init_hidden, init_obs))
+  init_deter, dist_mismatch = check_outcomes(init_stoch_state, False, model.game.depth_chance_valid_outcomes(0), probability_eps)
+  init_deter = init_deter[0]
+  distribution_mismatches += dist_mismatch
   init_carry = WalkCarry(legals= init_legals,
                             game_state = init_state,
                             hidden_state= init_hidden,
@@ -337,4 +357,7 @@ def model_walk_test(model:Dreamer|DreamerMA,
                             terminal=jnp.array(False),
                             after_chance=jnp.array(False)) 
   _tree_walk(init_carry)
+  avg_mistake_probs = mistake_cum_probs / num_visited_states
+  avg_distribution_mismatches = distribution_mismatches / num_visited_states
+  return avg_mistake_probs, avg_distribution_mismatches
 

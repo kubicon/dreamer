@@ -18,9 +18,19 @@ parser.add_argument("--model_dir", type=str, default="trained_networks/rnad/goof
 parser.add_argument("--restore_step", type=int, default=10000, help="Saved step of the model to restore")
 
 parser.add_argument("--seed", type=int, default=-1, help="Seed for the key to be used in gameplay. -1 for a random seed.")
+experiment_parsers = parser.add_subparsers(dest="experiment_type", required=True, help="Which experiment type to run. Currently available are: loaded"
+                                          "evaluate best responses against particular loaded model" \
+                                          "retrain : retrain a given model from a scratch and return a plot of its best response values with respect to iterations"
+                                          "nash: evaluate expected values of the model, best response values against it and also of a saved reference nash equilibrium strategy.")
+loaded_parser = experiment_parsers.add_parser(name="loaded", help="Evaluate best responses against particular loaded model")
+
+retrain_parser = experiment_parsers.add_parser(name="retrain", help="Retrain a given model from a scratch and return a plot of its best response values with respect to iterations")
+retrain_parser.add_argument("--neurd_steps", type=int, default=100, help="How many NeuRD steps to perform. Game solving steps between policy switches")
+retrain_parser.add_argument("--policy_steps", type=int, default=10, help="How many policy switch steps of the algorithm to perform.")
 
 
-   
+nash_parser = experiment_parsers.add_parser(name="nash", help="Evaluate expected values of the model, best response values against it and also of a saved reference nash equilibrium strategy.")
+nash_parser.add_argument("--nash_strategy_path", type=str, default="experiments/goofspiel_nash.pkl", help="Path to the saved nash strategy in pickle format. Must be formatted as a tuple of behavioral strategies per tree depth and iset map per tree_depth.")
    
 
 def model_walk_deterministic(model:RNaDDreamer):
@@ -35,7 +45,7 @@ def model_walk_deterministic(model:RNaDDreamer):
         #TODO: For now the model is learned using the decoder 
         # on original isets so it can be passed like that. Later, it might be necessary to
         # get some latent transformation first
-        pi = model.get_policy_both(model.optimizers.optimizer.model, joint_iset, legals)
+        pi = model.get_policy_both(model.optimizers.rnad_optimizer.model, joint_iset, legals)
         print(f"At state {game_state}")
         print(f"Model learned policy: {pi}")
         for ai1, a1 in enumerate(legals[0]):
@@ -109,7 +119,7 @@ def extract_model_policy(model: RNaDDreamer)-> tuple[list, list]:
     p1_legal, p2_legal = legals[0], legals[1]
     legal = p1_legal[..., None] * p2_legal[..., None, :]
 
-    pi = vectorized_get_policy(model.optimizers.optimizer.model, jnp.asarray(iset_map), jnp.asarray(iset_legal))
+    pi = vectorized_get_policy(model.optimizers.rnad_optimizer.model, jnp.asarray(iset_map), jnp.asarray(iset_legal))
     
     
     p1_actions = np.reshape(np.tile(np.repeat(np.arange(max_actions), max_actions), curr_iset.shape[1]), (curr_iset.shape[1], -1))
@@ -364,7 +374,7 @@ def model_best_response(model: RNaDDreamer, custom_policy: tuple[list, list] = N
     p1_legal, p2_legal = legals[0], legals[1]
     legal = p1_legal[..., None] * p2_legal[..., None, :]
 
-    pi = vectorized_get_policy(model.optimizers.optimizer.model, curr_iset, legals_non_padded) if checking_model else vectorized_get_policy(depth, curr_iset, legals_non_padded)
+    pi = vectorized_get_policy(model.optimizers.rnad_optimizer.model, curr_iset, legals_non_padded) if checking_model else vectorized_get_policy(depth, curr_iset, legals_non_padded)
     #[Pl, H(D), A(D)]
     pi = np.pad(pi, ((0, 0), (0, 0), (0, max_actions - pi.shape[-1])), constant_values=0)
     #Get reaches for each player.
@@ -513,6 +523,9 @@ def test_loaded(args):
   #breakpoint()
 
 def test_retrain(args):
+  """TODO: Redo this to support the joint training. 
+  Also, allow full entropy schedule. Probably, instead of a retrain method
+  it would be better to just evaluate a saved directory and plot the br_values."""
   print(f"Evaluating retraining model from {args.model_dir} at step {args.restore_step} with seed {args.seed}")
   model_path = args.model_dir
   if not model_path.startswith("/"):
@@ -527,9 +540,8 @@ def test_retrain(args):
   # bet amount 13, but the saved values do not account for it. Just rescale it for correspondence
   scale_factor = 13 if model.world_model.game.game_name() == "leduc" else 1
   config = model.config
-  neurd_steps = 100
-  after_init_step_multiplier = 4
-  init_policy_steps = 10
+  neurd_steps = args.neurd_steps
+  policy_steps = args.policy_steps
   new_config = RNaDConfig(
       batch_size=config.batch_size,
       seed=config.seed,
@@ -540,8 +552,8 @@ def test_retrain(args):
       state_sample_threshold=config.state_sample_threshold,
 
       # Entropy schedule parameters
-      entropy_schedule_size = (neurd_steps, after_init_step_multiplier * neurd_steps),
-      entropy_schedule_repeats = (init_policy_steps, 1),
+      entropy_schedule_size = (neurd_steps, neurd_steps),
+      entropy_schedule_repeats = (policy_steps, 1),
       
       #V-Trace parameters
       rho_vtrace = config.rho_vtrace,
@@ -569,7 +581,7 @@ def test_retrain(args):
   p1_br_val, p2_br_val = scale_factor * p1_br_val, scale_factor * p2_br_val
   print(f"P2 best response value against p1: {p2_br_val}")
   print(f"P1 best response value against p2 {p1_br_val}")
-  for i in range(init_policy_steps):
+  for i in range(policy_steps):
     for j in range(neurd_steps):
        clean_model.step()
     print(f"Step {clean_model.learner_steps}")
@@ -584,7 +596,7 @@ def test_retrain(args):
     #breakpoint()
   p1_exploitabilities = np.asarray(p1_exploitabilities)
   p2_exploitabilities = np.asarray(p2_exploitabilities)
-  policy_switch_steps = np.arange(init_policy_steps)
+  policy_switch_steps = np.arange(policy_steps)
   plt.plot(policy_switch_steps, p1_exploitabilities, label="Player 1 exploitability")
   plt.plot(policy_switch_steps, p2_exploitabilities, label="Player 2 exploitability")
   plt.legend()
@@ -609,6 +621,8 @@ def test_nash(args, saved_nash_path: str):
 
   model = load_model(model_path)
   assert isinstance(model, RNaDDreamer), f"Loaded model should be an instance of RNaDDreamer not {model.__class__}"
+  if not model.config.use_learned_model:
+    print(f"The model is learned on the real game {model.world_model.game.game_name()}")
   #The JAX version of Leduc divides all rewards by the max
   # bet amount 13, but the saved values do not account for it. Just rescale it for correspondence
   scale_factor = 13 if model.world_model.game.game_name() == "leduc" else 1
@@ -633,9 +647,12 @@ def test_nash(args, saved_nash_path: str):
 
 def main():
   args = parser.parse_args()
-  #test_retrain(args)
-  #test_loaded(args)
-  test_nash(args, saved_nash_path="experiments/goofspiel_nash.pkl")
+  if args.experiment_type == "retrain":
+    test_retrain(args)
+  elif args.experiment_type == "nash":
+    test_nash(args, saved_nash_path=args.nash_strategy_path)
+  else:
+    test_loaded(args)
   
 
 if __name__ == "__main__":

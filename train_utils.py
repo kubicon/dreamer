@@ -5,6 +5,50 @@ from games.jax_game import GameState
 import os
 import pickle
 
+from typing import Sequence, Tuple
+
+
+@chex.dataclass(frozen=True)
+class RNaDConfig:
+  
+  use_learned_model: bool = True # Whether to use the learned Dreamer model for sampling. If
+                                  # False, uses the original game environment. Just a debug flag that will be likely removed later.
+  send_signal_to_dreamer: bool = False #Whether to propagate gradients back to the dreamer
+                                        #world model. Used in single phase training.
+
+  batch_size: int = 64
+  
+  #Ordered as hidden layer size, num hidden layers
+  rnad_network_details: Tuple[int, int] = (256, 1)
+  
+  entropy_schedule_repeats: Sequence[int] = (1,)
+  entropy_schedule_size: Sequence[int] = (1000,)
+
+  eta: float = 0.2 #Regularization strenght
+  vtrace_eta: float = 0.2 #Strenght of the additional KL-regularization in V-trace
+
+  #V-trace parameters
+  rho_vtrace: float = 1.0 # Clipping parameter. Affects to which policy estimate V-trace converges. Inf means convergence to the estimate for the learned policy
+  c_vtrace: float = 1.0 # Clipping parameter
+  gamma_vtrace: float = 1.0 # Discount factor
+  lambda_vtrace: float = 1.0 #Same as TD-learning lambda
+
+  #NeuRD parameters
+  neurd_clip: float = 10000
+  neurd_threshold: float = 2.0
+
+
+  sampling_epsilon: float = 0.0
+  state_sample_threshold: float = 0.05 #A threshold when sampling states. The outcomes for
+                                        #each categorical below this threshold are ignored (or, specificaly a minimum
+                                        # of this threshold and the lowest of max probability outcomes of the categoricals). 
+  
+  learning_rate: float = 3e-4
+  target_network_update: float = 1e-3
+
+  seed: int = 42
+  network_seed: int = 99
+
 
 def symlog(x: chex.Array):
   return jnp.sign(x) * jnp.log(jnp.abs(x) + 1)
