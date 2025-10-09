@@ -77,28 +77,6 @@ def model_walk_test_deterministic(model:DreamerMA, eps:float = 0.05):
     check_state(model, stoch_state, hidden_state, state, legals, terminal, reward, eps=0.1)
     if terminal:
       return
-    #_, real_p1_iset, real_p2_iset, _ = model.game.get_info(state)
-    # p1_decoded_iset = model.get_decoder(model.optimizers.p1_decoder_optimizer.model, hidden_state, max_deter_state)
-    # p2_decoded_iset = model.get_decoder(model.optimizers.p2_decoder_optimizer.model, hidden_state, max_deter_state)
-    # pred_reward, pred_terminal = model.get_reward_and_terminal(model.optimizers.predictor_optimizer.model,hidden_state, max_deter_state)
-    # #print(f"In state {state}")
-    # if jnp.abs(reward - pred_reward) >= eps:
-    #   print(f"Predicted reward {pred_reward} differs from real reward {reward} by more than {eps}")
-    # if pred_terminal != terminal:
-    #   print(f"Predicted terminal {pred_terminal} does not match real terminal {terminal}")
-    # if jnp.max(jnp.abs(real_p1_iset - p1_decoded_iset)) >= 0.1:
-    #   print(f"Real iset and decoded iset for player 1 differ by more than 0.1")
-    #   print(f"Max difference {jnp.max(jnp.abs(real_p1_iset - p1_decoded_iset))}")
-    # if jnp.max(jnp.abs(real_p2_iset - p2_decoded_iset)) >= 0.1:
-    #   print(f"Real iset and decoded iset for player 2 differ by more than 0.1")
-    #   print(f"Max difference {jnp.max(jnp.abs(real_p2_iset - p2_decoded_iset))}")
-    # if jnp.max(jnp.abs(1 - max_probs)) >= eps:
-    #   print(f"Stoch state differs from deterministic by more than {eps}")
-    #   print(f"Stoch state max_probs {max_probs}")
-    #   real_obs = jnp.stack([real_p1_iset, real_p2_iset], axis=0)
-    #   represented_stoch = jax.nn.softmax(model.optimizers.encoder_optimizer.model(hidden_state, real_obs), axis=-1)
-    #   repr_max_probs = jnp.max(represented_stoch, axis=-1)
-    #   print(f"Represented (posterior) stochastic state max_probs {repr_max_probs}")
     pi = np.asarray(get_reference_policy(state, legals))
     for ai1, a1 in enumerate(pi[0]):
       if a1 < eps:

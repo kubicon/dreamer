@@ -83,7 +83,6 @@ def check_outcomes(stoch_state: jax.Array, is_chance:bool, num_chance_outcomes:i
   max_indices = jnp.argmax(stoch_state, axis=-1)
   #repr_max_probs = jnp.max(repr_stoch_state, axis=-1)
 
-  #FROM HERE ON I THINK IT ONLY WORKS FOR SINGLE CATEGORICAL
   chance_max_probs, chance_max_indices = jax.lax.top_k(stoch_state, num_chance_outcomes)
   chance_probs =  1 / num_chance_outcomes
   #Find the categorical that is closest to the uniform distribution
@@ -155,8 +154,7 @@ def check_terminal(model: Dreamer, terminal_stoch_state, terminal_hidden_state, 
       print(f"Predicted terminal {pred_terminal} does not match real terminal for outcome {comb} with probabilties {probs} {real_terminal}")
   
 
-def model_walk_test_stochastic(model:Dreamer, seed:int, eps:float = 0.05):
-  assert isinstance(model.game, PointCardMatchingStochastic), f"This test assumes stochastic point card matching game, not {model.game.__class__}"
+def model_walk_test(model:Dreamer, seed:int, eps:float = 0.05):
   key = jax.random.key(seed)
   key, init_key = jax.random.split(key)
 

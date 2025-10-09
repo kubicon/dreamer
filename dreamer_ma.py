@@ -292,7 +292,9 @@ class DreamerMA():
   def world_model_train_step(self):
     rng_key = self.generate_key()
     #return self.world_model_train(self.optimizers, rng_key)
-    return self.cached_train(rng_key)
+    loss = self.cached_train(rng_key)
+    self.learner_steps += 1
+    return loss
 
   def train_world_model(self, model_save_dir:str, num_steps:int, print_each: int = -1, save_each: int = -1):
      
@@ -304,13 +306,15 @@ class DreamerMA():
       if save_each > 0 and i % save_each == 0:
         model_file = model_save_dir + f"step_{i}.pkl"
         save_model(self, model_file)
+      self.learner_steps += 1
    
   def __getstate__(self):
     return {
       "config": self.config,
       "game": self.game,
       "jax_rngs": self.jax_rngs,
-      "optimizers": nnx.state(self.optimizers)
+      "optimizers": nnx.state(self.optimizers),
+      "steps": self.learner_steps
     }
     
 
@@ -327,6 +331,7 @@ class DreamerMA():
     
     self.jax_rngs = state["jax_rngs"]
     self.optimizers = self.update_nnx(self.optimizers, state["optimizers"])
+    self.learner_steps = state["steps"]
 
   @partial(nnx.jit, static_argnums=(0, 5, 6))
   def get_predictor(self, predictor_model: Predictor, legal_model: LegalActionsNetwork, 

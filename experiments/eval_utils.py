@@ -21,7 +21,7 @@ class WalkCarry:
   terminal: chex.Array
   after_chance: chex.Array
 
-def check_outcomes(stoch_state: chex.Array, is_chance:bool, num_chance_outcomes:int,  eps:float) ->list:
+def check_outcomes(stoch_state: chex.Array, is_chance:bool, num_chance_outcomes:int,  eps:float, verbose = False) ->list:
   """Checks validity of learned distributions. In non chance levels, all categoricals
   should be deterministic. In chance level, checks whether there is a categorical
   ,that correctly models the chance outcome distribution .
@@ -54,14 +54,16 @@ def check_outcomes(stoch_state: chex.Array, is_chance:bool, num_chance_outcomes:
   if is_chance:
     if jnp.max(jnp.abs(chance_probs - uniform_categorical)) >= eps:
       distribution_mismatch = 1
-  #     print(f"Stochastic state differs from a stochastic uniform by more than {eps}")
-  #     print(f"Stochastic state  max probs {uniform_categorical}")
+      if verbose:
+        print(f"Stochastic state differs from a stochastic uniform by more than {eps}")
+        print(f"Stochastic state  max probs {uniform_categorical}")
   #     #print(f"Represented (posterior) stochastic state two max probs {repr_two_max_probs}")
   else:
     if jnp.max(jnp.abs(1 - max_probs)) >= eps:
       distribution_mismatch = 1
-  #     print(f"Stochastic state differs from deterministic more than {eps}")
-  #     print(f"Stochastic state max probs {max_probs}")
+      if verbose:
+        print(f"Stochastic state differs from deterministic more than {eps}")
+        print(f"Stochastic state max probs {max_probs}")
       #print(f"Represented (posterior) stochastic state max probs {repr_max_probs}")
 
   chance_max_dets = jax.nn.one_hot(uniform_categorical_indices, stoch_state.shape[-1], axis=-1)
@@ -186,7 +188,7 @@ def create_iset_map(curr_iset, amount_actions, curr_legal):
 def model_walk_test(model:Dreamer|DreamerMA,
                     all_outcome_check_fn,
                     one_outcome_check_fn,
-                     difference_eps = 0.2, probability_eps = 0.05, probability_threshold=0.05):
+                     difference_eps = 0.2, probability_eps = 0.05, probability_threshold=0.05, verbose=False):
   """Walk through the entire game tree in each state, check
   whether all the Dreamer learned states 
   with a probability above certain threshold represent
@@ -240,9 +242,9 @@ def model_walk_test(model:Dreamer|DreamerMA,
     num_visited_states += 1
     #print(f"Num visited states {num_visited_states}")
     if carry.after_chance:
-      mistake_cum_probs  = mistake_cum_probs + one_outcome_check_fn(model, carry, difference_eps)
+      mistake_cum_probs  = mistake_cum_probs + one_outcome_check_fn(model, carry, difference_eps, verbose)
     else:
-      mistake_cum_probs = mistake_cum_probs + all_outcome_check_fn(model, carry, difference_eps, probability_threshold)
+      mistake_cum_probs = mistake_cum_probs + all_outcome_check_fn(model, carry, difference_eps, probability_threshold, verbose)
     if carry.terminal:
       return
     pi = np.asarray(get_reference_policy(carry.game_state, carry.legals))
@@ -261,7 +263,9 @@ def model_walk_test(model:Dreamer|DreamerMA,
             
       is_chance = model.game.is_chance(next_state)
       chance_outcomes = model.game.depth_chance_valid_outcomes(depth + 1)
-      next_deters, dist_mismatch = check_outcomes(next_stoch_state, is_chance, chance_outcomes, probability_eps) 
+      if verbose:
+        print(f"Checking state {next_state}")
+      next_deters, dist_mismatch = check_outcomes(next_stoch_state, is_chance, chance_outcomes, probability_eps, verbose=verbose) 
       distribution_mismatches = distribution_mismatches + dist_mismatch
       if is_chance:
         next_states, next_terminals, next_rewards, next_legals, next_probs = unroll_chance_node(model.game, next_state, chance_outcomes)
@@ -325,8 +329,10 @@ def model_walk_test(model:Dreamer|DreamerMA,
       # because they are differentiated by the observations.
       init_obs = get_obs_fn(next_state)
       #print(f"Init obs for outcome {i}, is {init_obs}")
+      if verbose:
+        print(f"Checking state {next_state}")
       init_stoch_state = get_stoch_from_prediction(model.get_encoder(model.optimizers.encoder_optimizer.model, init_hidden, init_obs))
-      init_deter, dist_mismatch = check_outcomes(init_stoch_state, False, chance_outcomes, probability_eps)
+      init_deter, dist_mismatch = check_outcomes(init_stoch_state, False, chance_outcomes, probability_eps, verbose)
       init_deter = init_deter[0]
       distribution_mismatches += dist_mismatch
       init_carry = WalkCarry(legals= next_legal,
@@ -345,7 +351,9 @@ def model_walk_test(model:Dreamer|DreamerMA,
     return avg_mistake_probs, avg_distribution_mismatches
   init_obs = get_obs_fn(init_state)
   init_stoch_state = get_stoch_from_prediction(model.get_encoder(model.optimizers.encoder_optimizer.model, init_hidden, init_obs))
-  init_deter, dist_mismatch = check_outcomes(init_stoch_state, False, model.game.depth_chance_valid_outcomes(0), probability_eps)
+  if verbose:
+    print(f"Checking state {init_state}")
+  init_deter, dist_mismatch = check_outcomes(init_stoch_state, False, model.game.depth_chance_valid_outcomes(0), probability_eps, verbose)
   init_deter = init_deter[0]
   distribution_mismatches += dist_mismatch
   init_carry = WalkCarry(legals= init_legals,

@@ -17,11 +17,12 @@ parser.add_argument("--restore_step", type=int, default=-1, help="Saved step of 
 
 parser.add_argument("--seed", type=int, default=-1, help="Seed for the key to be used in gameplay. -1 for a random seed.")
 
+parser.add_argument("--verbose", action="store_true", help="A flag whether to also print information about states being checked")
 
 
 
 
-def check_state_all_outcomes(model: Dreamer, carry: WalkCarry, eps: float, outcome_threshold: float = 0.1):
+def check_state_all_outcomes(model: Dreamer, carry: WalkCarry, eps: float, outcome_threshold: float = 0.1, verbose=False):
   """Checks a state whether all the possible outcomes produce valid output."""
   mistake_probs = np.zeros(3)
   stoch_state = np.asarray(carry.stoch_state)
@@ -61,7 +62,7 @@ def check_state_all_outcomes(model: Dreamer, carry: WalkCarry, eps: float, outco
   return mistake_probs
   #breakpoint()
 
-def check_state_one_outcome(model: Dreamer, carry: WalkCarry,  eps: float):
+def check_state_one_outcome(model: Dreamer, carry: WalkCarry,  eps: float, verbose=False):
   """Check whether the given sampled deterministic state
   produces valid output. Used for checking one particular chance outcome"""
   mistake_probs = np.zeros(3)
@@ -113,7 +114,8 @@ def main():
     print(f"Restored model from {model_path}")
     mistake_probs, distribution_mismatch_prob = model_walk_test(model,
                     all_outcome_check_fn = check_state_all_outcomes,
-                    one_outcome_check_fn = check_state_one_outcome)
+                    one_outcome_check_fn = check_state_one_outcome,
+                    verbose=args.verbose)
     all_mistake_probs.append(mistake_probs)
     distribution_mismatch_probs.append(distribution_mismatch_prob)
     steps.append(step)

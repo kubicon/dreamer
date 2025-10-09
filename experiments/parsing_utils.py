@@ -54,7 +54,7 @@ def add_rnad_arguments(parser: ArgumentParser, joint_train: bool =False) ->Argum
   parser.add_argument("--vtrace_eta", type=float, default=0.2, help="Strenght of the additional KL regularization term in V-trace.")
   parser.add_argument("--sampling_epsilon", type=float, default=0.0, help="Defines mix of uniform policy to the network learned policy during trajectory sampling.")
   parser.add_argument("--state_sample_threshold", type=float, default=0.05, help="Threshold for the stochastic state sampling. If the probability of a class is below this threshold, it is not sampled.")
-  parser.add_argument("--use_learned_model", type=bool, default=False, help="Whether to use the Dreamer learned model for trajectory sampling. If not, trajectories are sampled from the game. Just for debugging.")
+  parser.add_argument("--use_learned_model", type=bool, default=True, help="Whether to use the Dreamer learned model for trajectory sampling. If not, trajectories are sampled from the game. Just for debugging.")
 
   diff_string = "rnad_" if joint_train else ""
   parser.add_argument(f"--{diff_string}batch_size", type=int, default=32, help="Batch size for training")

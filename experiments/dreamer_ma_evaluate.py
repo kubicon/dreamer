@@ -19,10 +19,11 @@ parser = ArgumentParser()
 parser.add_argument("--model_dir", type=str, default="trained_networks/dreamer/goofspiel_3/seed99/network_seed42", help="Path to the directory of saved models")
 parser.add_argument("--restore_step", type=int, default=-1, help="Saved step of the model to restore. If -1, checks all models within that folder.")
 
+parser.add_argument("--verbose", action="store_true", help="A flag whether to also print information about states being checked")
 
 
 
-def check_state_all_outcomes(model: DreamerMA, carry: WalkCarry,  eps: float, outcome_threshold: float = 0.1):
+def check_state_all_outcomes(model: DreamerMA, carry: WalkCarry,  eps: float, outcome_threshold: float = 0.1, verbose = False):
   """Checks for a stochastic state whether all deterministic 
   states, where their components have pbt >= outcome_threshold produce valid results."""
   mistake_probs = np.zeros(5)
@@ -76,7 +77,7 @@ def check_state_all_outcomes(model: DreamerMA, carry: WalkCarry,  eps: float, ou
   #Ordered p1_iset, p2_iset, terminal, reward, legals
   return mistake_probs
 
-def check_state_one_outcome(model: DreamerMA, carry:WalkCarry, eps:float):
+def check_state_one_outcome(model: DreamerMA, carry:WalkCarry, eps:float, verbose = False):
   """Check whether the best fitting deterministic state for the state
   produces valid results. Used for post-chance node states, to check 
   whether it corresponds to the correct outcome."""
@@ -167,10 +168,11 @@ def main():
       nnx.update(model.optimizers, nnx.split(temp_model.optimizers)[1])
       #model.optimizers = model.update_nnx(model.optimizers, nnx.split(temp_model.optimizers)[1])
 
-    print(f"Restored model from {model_path}", file=sys.stderr)
+    print(f"Restored model from {model_path}")
     mistake_probs, distribution_mismatch_prob = model_walk_test(model,
                     all_outcome_check_fn = check_state_all_outcomes,
-                    one_outcome_check_fn = check_state_one_outcome)
+                    one_outcome_check_fn = check_state_one_outcome,
+                    verbose=args.verbose)
     all_mistake_probs.append(mistake_probs)
     steps.append(step)
     distribution_mismatch_probs.append(distribution_mismatch_prob)
@@ -186,7 +188,7 @@ def main():
   #profiler.stop()
   #print(profiler.output_text(color=True, unicode=True))
   if len(all_mistake_probs) == 0:
-    raise FileNotFoundError(f"Model file {model_dir} and restore step {args.restore_step}. Did not find any file. Make sure"
+    raise FileNotFoundError(f"Model directory {model_dir} and restore step {args.restore_step}. Did not find any file. Make sure"
                             "the directory contains a file in a form of step_restore_step.pkl, "
                             "where restore_step is either the specified number, or arbitrary integer if -1.")
   all_mistake_probs = np.asarray(all_mistake_probs)
@@ -211,7 +213,10 @@ def main():
   empty = ""
   game_params = model.game.params_dict()
   params_str = f'{empty.join(f"_{value}" for key, value in game_params.items())}'
-  plt.savefig(f"plots/mistake_probs/{plot_subdir_str}/{model.game.game_name()}{params_str}.pdf")
+  plt_dir = f"plots/mistake_probs/{plot_subdir_str}"
+  if not os.path.exists(plt_dir):
+    os.makedirs(plt_dir)
+  plt.savefig(f"{plt_dir}/{model.game.game_name()}{params_str}.pdf")
 
 if __name__ == "__main__":
   main()

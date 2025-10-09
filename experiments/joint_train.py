@@ -48,7 +48,7 @@ def joint_train_loop(args, game:JaxGame, ):
   rnad_config = RNaDConfig(
       batch_size=args.rnad_batch_size,
       seed=rnad_trajectory_seed,
-      use_learned_model = args.use_learned_model,
+      use_learned_model = True,
       send_signal_to_dreamer = True,
 
       eta=args.eta,

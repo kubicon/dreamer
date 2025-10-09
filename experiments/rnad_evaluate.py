@@ -4,25 +4,30 @@ import jax
 import jax.numpy as jnp
 import flax.nnx as nnx
 import os
+import time
 import matplotlib.pyplot as plt
 
 
 from train_utils import load_model
 from experiments.eval_utils import cartesian_product, stringify, find_closest_index, create_iset_map, unroll_chance_node
 from games.jax_game import JaxGame, GameState
-from rnad_dreamer import RNaDDreamer, RNaDConfig
+from rnad_dreamer import RNaDDreamer, RNaDConfig, JointOptimizers
 
 parser = ArgumentParser()
 
 parser.add_argument("--model_dir", type=str, default="trained_networks/rnad/goofspiel_3/seed99/network_seed42", help="Path to the directory of saved models")
-parser.add_argument("--restore_step", type=int, default=10000, help="Saved step of the model to restore")
+parser.add_argument("--restore_step", type=int, default=10000, help="Saved step of the model to restore. If checking entire directory, -1 is also supported for all steps")
 
 parser.add_argument("--seed", type=int, default=-1, help="Seed for the key to be used in gameplay. -1 for a random seed.")
+parser.add_argument("--scale_factor", type=float, default=1.0, help="Scale factor to multiply all rewards by. Useful if the game implementation scaled rewards in a different way than traditional implementations."
+                    "Then, this should be the inverse of the game scaling factor. For example, JaxLeduc divides all rewards by 13, so to get values appriopriately scaled as in literature, this should be set to 13.")
+
 experiment_parsers = parser.add_subparsers(dest="experiment_type", required=True, help="Which experiment type to run. Currently available are: loaded"
-                                          "evaluate best responses against particular loaded model" \
+                                          "evaluate best responses against particular loaded model, or all models in the directory if restore_step is -1" \
                                           "retrain : retrain a given model from a scratch and return a plot of its best response values with respect to iterations"
                                           "nash: evaluate expected values of the model, best response values against it and also of a saved reference nash equilibrium strategy.")
-loaded_parser = experiment_parsers.add_parser(name="loaded", help="Evaluate best responses against particular loaded model")
+
+loaded_parser = experiment_parsers.add_parser(name="loaded", help="Evaluate best responses against particular loaded model, or all models in the directory if restore_step is -1")
 
 retrain_parser = experiment_parsers.add_parser(name="retrain", help="Retrain a given model from a scratch and return a plot of its best response values with respect to iterations")
 retrain_parser.add_argument("--neurd_steps", type=int, default=100, help="How many NeuRD steps to perform. Game solving steps between policy switches")
@@ -502,25 +507,108 @@ def model_best_response(model: RNaDDreamer, custom_policy: tuple[list, list] = N
 
 
 def test_loaded(args):
-  print(f"Evaluating model from {args.model_dir} at step {args.restore_step} with seed {args.seed}")
-  model_path = args.model_dir
-  if not model_path.startswith("/"):
-    model_path = os.getcwd() + "/" + model_path
-  model_path = model_path + f"/step_{args.restore_step}.pkl"
-  if not os.path.exists(model_path):
-    raise FileNotFoundError(f"Model file {model_path} does not exist.")
+  # print(f"Evaluating model from {args.model_dir} at step {args.restore_step} with seed {args.seed}")
+  # model_path = args.model_dir
+  # if not model_path.startswith("/"):
+  #   model_path = os.getcwd() + "/" + model_path
+  # model_path = model_path + f"/step_{args.restore_step}.pkl"
+  # if not os.path.exists(model_path):
+  #   raise FileNotFoundError(f"Model file {model_path} does not exist.")
 
-  model = load_model(model_path)
-  assert isinstance(model, RNaDDreamer), f"Loaded model should be an instance of RNaDDreamer not {model.__class__}"
-  #The JAX version of Leduc divides all rewards by the max
-  # bet amount 13, but the saved values do not account for it. Just rescale it for correspondence
-  scale_factor = 13 if model.world_model.game.game_name() == "leduc" else 1
-  #model_walk_deterministic(model)
-  p2_br_val, p1_br_val, p1_br, p2_br = model_best_response(model)
-  p1_br_val, p2_br_val = scale_factor * p1_br_val, scale_factor * p2_br_val
-  print(f"P2 best response value against p1: {p2_br_val}")
-  print(f"P1 best response value against p2 {p1_br_val}")
-  #breakpoint()
+  # model = load_model(model_path)
+  # assert isinstance(model, RNaDDreamer), f"Loaded model should be an instance of RNaDDreamer not {model.__class__}"
+  # #The JAX version of Leduc divides all rewards by the max
+  # # bet amount 13, but the saved values do not account for it. Just rescale it for correspondence
+  # scale_factor = 13 if model.world_model.game.game_name() == "leduc" else 1
+  # #model_walk_deterministic(model)
+  # p2_br_val, p1_br_val, p1_br, p2_br = model_best_response(model)
+  # p1_br_val, p2_br_val = scale_factor * p1_br_val, scale_factor * p2_br_val
+  # print(f"P2 best response value against p1: {p2_br_val}")
+  # print(f"P1 best response value against p2 {p1_br_val}")
+  model_dir = args.model_dir
+  p1_exploitabilities = []
+  p2_exploitabilities = []
+  steps = []
+  if not model_dir.startswith("/"):
+    model_dir = os.getcwd() + "/" + model_dir
+  if not os.path.exists(model_dir):
+      raise FileNotFoundError(f"Model directory {model_dir} does not exist.")
+  #profiler = Profiler()
+  print("Starting evaluation")
+  start_time = time.time()
+  #profiler.start()
+  first = True
+  model = None
+  plot_subdir_str = "rnad_only"
+  for filename in os.listdir(model_dir):
+    name, filetype = filename.split(".")
+    if not filetype == "pkl":
+      continue
+    step = int(name.split("_")[-1])
+
+    if not (args.restore_step == -1 or step == args.restore_step):
+      continue
+
+    model_path = model_dir + "/"  + filename
+    
+    #This assumes all the models were trained with the same config
+    # else it will break
+    if first:
+      model = load_model(model_path)
+      assert isinstance(model, RNaDDreamer), f"The given model should be an instance of RNaDDreamer, not {model.__class__}"
+      if isinstance(model.optimizers, JointOptimizers):
+        plot_subdir_str = "compound"
+      first=False
+    else:
+      temp_model = load_model(model_path)
+      assert isinstance(temp_model, RNaDDreamer), f"The given model should be an instance of RNaDDreamer, not {model.__class__}"
+      #TODO: Updating this way still forces retracing of get_info and
+      # initialize_structures of the game, since it is called in init. In general
+      # we just need the state of the optimizers object from the model
+      # and the rest of the operations are redundant.
+      nnx.update(model.optimizers, nnx.split(temp_model.optimizers)[1])
+      model.world_model.learner_steps = temp_model.world_model.learner_steps
+      #model.optimizers = model.update_nnx(model.optimizers, nnx.split(temp_model.optimizers)[1])
+    print(f"Restored model from {model_path}")
+    if model.config.use_learned_model:
+      print(f"Model is learned on Dreamer, that took {model.world_model.learner_steps} steps.")
+    else:
+      print(f"Model is trained on the original game.")
+    p2_br_val, p1_br_val, p1_br, p2_br = model_best_response(model)
+    p1_br_val, p2_br_val = args.scale_factor * p1_br_val, args.scale_factor * p2_br_val
+    p1_exploitabilities.append(p2_br_val)
+    p2_exploitabilities.append(p1_br_val)
+    steps.append(step)
+  print("Ended evaluation")
+  print(f"Evaluation took {time.time() - start_time:.2f} seconds.")
+  #profiler.stop()
+  #print(profiler.output_text(color=True, unicode=True))
+  if len(steps) == 0:
+    raise FileNotFoundError(f"Model directory {model_dir} and restore step {args.restore_step}. Did not find any file. Make sure"
+                            "the directory contains a file in a form of step_restore_step.pkl, "
+                            "where restore_step is either the specified number, or arbitrary integer if -1.")
+  p1_exploitabilities = np.asarray(p1_exploitabilities)
+  steps = np.asarray(steps)
+  p2_exploitabilities = np.asarray(p2_exploitabilities)
+  sort_indices = np.argsort(steps)
+  sorted_p1_exploitabilities = p1_exploitabilities[sort_indices]
+  sorted_steps = steps[sort_indices]
+  sorted_p2_exploitabilities = p2_exploitabilities[sort_indices]
+
+  fig, ax = plt.subplots()
+  ax.plot(sorted_steps, sorted_p1_exploitabilities, label="Player 1 exploitability")
+  ax.plot(sorted_steps, sorted_p2_exploitabilities, label="Player 2 exploitability")
+  ax.legend()
+  ax.set_xlabel("Training step")
+  ax.set_ylabel("Exploitability")
+  ax.set_title("Exploitability of RNaD Dreamer")
+  empty = ""
+  game_params = model.world_model.game.params_dict()
+  params_str = f'{empty.join(f"_{value}" for key, value in game_params.items())}'
+  plt_dir = f"plots/exploitabilities/{plot_subdir_str}"
+  if not os.path.exists(plt_dir):
+    os.makedirs(plt_dir)
+  plt.savefig(f"{plt_dir}/{model.world_model.game.game_name()}{params_str}.pdf")
 
 def test_retrain(args):
   """TODO: Redo this to support the joint training. 
@@ -536,9 +624,6 @@ def test_retrain(args):
 
   model = load_model(model_path)
   assert isinstance(model, RNaDDreamer), f"Loaded model should be an instance of RNaDDreamer not {model.__class__}"
-  #The JAX version of Leduc divides all rewards by the max
-  # bet amount 13, but the saved values do not account for it. Just rescale it for correspondence
-  scale_factor = 13 if model.world_model.game.game_name() == "leduc" else 1
   config = model.config
   neurd_steps = args.neurd_steps
   policy_steps = args.policy_steps
@@ -578,7 +663,6 @@ def test_retrain(args):
   print(f"Step {clean_model.learner_steps}")
   print(f"Policy switch step {clean_model.policy_switch_steps}")
   p2_br_val, p1_br_val, p1_br, p2_br = model_best_response(clean_model)
-  p1_br_val, p2_br_val = scale_factor * p1_br_val, scale_factor * p2_br_val
   print(f"P2 best response value against p1: {p2_br_val}")
   print(f"P1 best response value against p2 {p1_br_val}")
   for i in range(policy_steps):
@@ -588,7 +672,7 @@ def test_retrain(args):
     print(f"Policy switch step {clean_model.policy_switch_steps}")
     #model_walk_deterministic(clean_model, seed)
     p2_br_val, p1_br_val, p1_br, p2_br = model_best_response(clean_model)
-    p1_br_val, p2_br_val = scale_factor * p1_br_val, scale_factor * p2_br_val
+    p1_br_val, p2_br_val = args.scale_factor * p1_br_val, args.scale_factor * p2_br_val
     print(f"P2 best response value against p1: {p2_br_val}")
     print(f"P1 best response value against p2 {p1_br_val}")
     p1_exploitabilities.append(p2_br_val)
@@ -601,7 +685,6 @@ def test_retrain(args):
   plt.plot(policy_switch_steps, p2_exploitabilities, label="Player 2 exploitability")
   plt.legend()
   plt.savefig(f"plots/br_values/{model.world_model.game.game_name()}/neurd_steps{neurd_steps}.pdf")
-
 
 def test_nash(args, saved_nash_path: str):
   model_path = args.model_dir
@@ -623,22 +706,20 @@ def test_nash(args, saved_nash_path: str):
   assert isinstance(model, RNaDDreamer), f"Loaded model should be an instance of RNaDDreamer not {model.__class__}"
   if not model.config.use_learned_model:
     print(f"The model is learned on the real game {model.world_model.game.game_name()}")
-  #The JAX version of Leduc divides all rewards by the max
-  # bet amount 13, but the saved values do not account for it. Just rescale it for correspondence
-  scale_factor = 13 if model.world_model.game.game_name() == "leduc" else 1
+  
   p1_nash_val, p2_nash_val, nash_iset_map, nash_behaviorals = load_model(nash_path)
   print(f"Loaded nash policies of game with game value {p1_nash_val} (from player 1 perspective)")
   model_map, model_behaviorals = extract_model_policy(model)
   found_p1_nash, found_p2_nash = policy_expected_value(model.world_model.game, (nash_iset_map, nash_behaviorals), eps=1e-5)
-  found_p1_nash, found_p2_nash = scale_factor * found_p1_nash, scale_factor * found_p2_nash
+  found_p1_nash, found_p2_nash = args.scale_factor * found_p1_nash, args.scale_factor * found_p2_nash
   print(f"Found nash values: {found_p1_nash} {found_p2_nash}")
   assert np.isclose(found_p1_nash, p1_nash_val, atol=1e-5), f"Found nash value {found_p1_nash} and saved nash value {p1_nash_val} for player 1 differ!"
   assert np.isclose(found_p1_nash, p1_nash_val, atol=1e-5), f"Found nash value {found_p2_nash} and saved nash value {p2_nash_val} for player 2 differ!"
   model_p1_val, model_p2_val = policy_expected_value(model.world_model.game, (model_map, model_behaviorals))
-  model_p1_val, model_p2_val = scale_factor * model_p1_val, scale_factor * model_p2_val
+  model_p1_val, model_p2_val = args.scale_factor * model_p1_val, args.scale_factor * model_p2_val
   print(f"Model values {model_p1_val}, {model_p2_val}")
   p2_br_val, p1_br_val, p1_br, p2_br = model_best_response(model)
-  p1_br_val, p2_br_val = scale_factor * p1_br_val, scale_factor * p2_br_val
+  p1_br_val, p2_br_val = args.scale_factor * p1_br_val, args.scale_factor * p2_br_val
   print(f"P2 best response value against p1: {p2_br_val}")
   print(f"P1 best response value against p2 {p1_br_val}")
   #compare_policies(model.world_model.game, (model_map, model_behaviorals), (nash_iset_map, nash_behaviorals))

@@ -67,7 +67,8 @@ def legal_policy(logit: chex.Array, legal: chex.Array):
   # if +- inf or NaN appears already in the exp_logit
   # at which point it is an error in the network
   masked_exp_logit = exp_logit * legal
-  policy = masked_exp_logit / jnp.sum(masked_exp_logit, axis=-1, keepdims=True)
+  normalization = jnp.sum(masked_exp_logit, axis=-1, keepdims=True)
+  policy = masked_exp_logit / (normalization + (normalization == 0))
   return policy
 
 def legal_log_policy(logit: chex.Array, legal: chex.Array):

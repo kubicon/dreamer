@@ -7,7 +7,6 @@ import jax.lax as lax
 
 import flax.nnx as nnx
 import chex
-import optax
 
 import numpy as np
 import os
@@ -20,6 +19,8 @@ from networks import initialize_rnad_optimizers, initialize_joint_optimizers, RN
 from train_utils import RNaDConfig, RNaDTimeStep, load_model, save_model
 from distributions import sample_categorical
 from games.jax_game import GameState
+
+#jax.config.update("jax_debug_nans", True)
 
   
 
@@ -492,7 +493,8 @@ class RNaDDreamer():
       #get policy 
       pi = self.get_policy_both(rnad_network, obs, carry.legal_actions)
       #uniform mix to the policy
-      uniform_pi = carry.legal_actions / jnp.sum(carry.legal_actions, axis=-1, keepdims=True)
+      normalization = jnp.sum(carry.legal_actions, axis=-1, keepdims=True)
+      uniform_pi = carry.legal_actions / (normalization + (normalization == 0))
       pi = self.config.sampling_epsilon * uniform_pi + (1 - self.config.sampling_epsilon) * pi
       # For each player samples a single action
       
@@ -508,7 +510,11 @@ class RNaDDreamer():
       next_deter = sample_categorical(next_stoch, state_sample_key, uniform_mix=0.0, sample_threshold=self.config.state_sample_threshold)
       next_reward, next_terminal, next_legal = self.world_model.get_predictor(predictor, legal_network, next_hidden, next_deter)
       next_terminal = jnp.logical_or(carry.terminal, next_terminal)
-      valid = jnp.logical_not(carry.terminal)
+      # Dreamer can produce all actions to be invalid
+      # even when one of the players does not act, he always has one legal
+      # NOOP action. So, if one of the players has all actions invalid, then
+      # the state is not valid
+      valid = jnp.logical_and(jnp.logical_not(carry.terminal), jnp.all(normalization > 0))
       timestep = RNaDTimeStep(
         obs = obs,
         legal = carry.legal_actions,
@@ -521,10 +527,10 @@ class RNaDDreamer():
         hidden_state = next_hidden,
         deter_state = next_deter,
         legal_actions=jnp.where(next_terminal, self.example_timestep.legal, next_legal),
-        terminal = next_terminal,
+        terminal = jnp.logical_or(next_terminal, jnp.logical_not(valid)),
       )
          
-      timestep = jax.tree.map(lambda t, f: jnp.where(carry.terminal, t, f), self.example_timestep, timestep)
+      timestep = jax.tree.map(lambda t, f: jnp.where(valid, t, f), timestep, self.example_timestep)
       return new_carry, timestep
     _, timestep = _sample_trajectory(init_carry, trajectory_key, rnad_network, sequence_model, dynamics, predictor, legal_network, p1_iset_decoder, p2_iset_decoder)
     #[Trajectory, ...]
@@ -571,9 +577,10 @@ class RNaDDreamer():
       #get policy 
       #pi = self.get_policy_both(rnad_network, obs, carry.legal_actions)
       is_chance = self.world_model.game.is_chance(carry.game_state)
-      pi = jnp.where(is_chance, carry.legal_actions / jnp.sum(carry.legal_actions, axis=-1, keepdims=True), self._jit_get_policy(rnad_network, obs, carry.legal_actions))
+      normalization = jnp.sum(carry.legal_actions, axis=-1, keepdims=True)
+      pi = jnp.where(is_chance, carry.legal_actions / (normalization + (normalization == 0)), self._jit_get_policy(rnad_network, obs, carry.legal_actions))
       #uniform mix to the policy
-      uniform_pi = carry.legal_actions / jnp.sum(carry.legal_actions, axis=-1, keepdims=True)
+      uniform_pi = carry.legal_actions / (normalization + (normalization == 0))
       pi = self.config.sampling_epsilon * uniform_pi + (1 - self.config.sampling_epsilon) * pi
       # For each player samples a single action
       
