@@ -336,7 +336,22 @@ class RNaDDreamerJoint():
       
     #TODO: For now taking the first step
     # Change this to randomly sampling a starting point  
-    starting_points = jax.tree_util.tree_map(lambda x: x[0], dreamer_timestep)
+    #starting_points = jax.tree_util.tree_map(lambda x: x[0], dreamer_timestep)
+    starting_key, trajectory_key = jax.random.split(trajectory_key)
+    starting_key = jax.random.split(starting_key, self.world_model.config.batch_size)
+    #jax.debug.breakpoint()
+    def choose_starting_point(timestep: TimeStep, key):
+      """Choose a starting point that is not invalid or terminal in the timestep
+      uniformly. Chooses over the trajectory dimension and should be 
+      vmaped over the batch dimension"""
+      validity_mask = timestep.valid * ~(timestep.terminal)
+      p = validity_mask / jnp.sum(validity_mask)
+      chosen_idx = jax.random.choice(key, p.shape[0], p = p)
+      sampled_start = jax.tree_util.tree_map(lambda x: jnp.take_along_axis(x, chosen_idx.reshape((1,) * x.ndim), axis=0).squeeze(0), timestep)
+      #jax.debug.breakpoint()
+      return sampled_start
+    vectorized_starting_point = jax.vmap(choose_starting_point, in_axes=(1, 0), out_axes=(0))
+    starting_points = vectorized_starting_point(dreamer_timestep, starting_key)
     loss, grads = nnx.value_and_grad(rnad_loss, argnums=(0 ,1, 2, 3, 4, 5, 6, 7))(
       optimizers.rnad_optimizer.model,
       optimizers.sequence_optimizer.model,
@@ -382,6 +397,8 @@ class RNaDDreamerJoint():
   @partial(nnx.jit, static_argnums=(0))
   def _jit_step_with_model(self, optimizers: JointOptimizers, prev_network: RNaDNetwork, _prev_network: RNaDNetwork
                 ,trajectory_key, dreamer_timestep: TimeStep, learner_steps: int):
+    #
+    
     alpha, update_regularization = self._entropy_schedule(learner_steps)
     prev_network, _prev_network, loss = self.update_parameters_and_model(
       optimizers, prev_network, _prev_network, trajectory_key, dreamer_timestep, alpha, update_regularization
@@ -391,7 +408,7 @@ class RNaDDreamerJoint():
   
   def step(self, dreamer_timestep: TimeStep):
     trajectory_key = self.get_next_rng_key()
-    #self.prev_network, self._prev_network, loss, update_regularization =  self._jit_step_with_model(self.optimizers, self.prev_network, self._prev_network, trajectory_key, self.learner_steps)
+    #self.prev_network, self._prev_network, loss, update_regularization =  self._jit_step_with_model(self.optimizers, self.prev_network, self._prev_network, trajectory_key, dreamer_timestep, self.learner_steps)
     self.prev_network, self._prev_network, loss, update_regularization = self.cached_step(trajectory_key, dreamer_timestep, self.learner_steps)
     self.learner_steps += 1
     self.policy_switch_steps += int(update_regularization)
