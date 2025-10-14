@@ -1,7 +1,8 @@
 import os
 import numpy as np
+import jax
 
-from rnad_dreamer import RNaDDreamer, RNaDConfig
+from rnad_dreamer_joint import RNaDDreamerJoint, RNaDConfig
 from dreamer_ma import DreamerMA, DreamerMAConfig
 from games.jax_game import JaxGame
 from train_utils import save_model
@@ -49,7 +50,6 @@ def joint_train_loop(args, game:JaxGame, ):
       batch_size=args.rnad_batch_size,
       seed=rnad_trajectory_seed,
       use_learned_model = True,
-      send_signal_to_dreamer = True,
 
       eta=args.eta,
       vtrace_eta = args.vtrace_eta,
@@ -87,7 +87,7 @@ def joint_train_loop(args, game:JaxGame, ):
       model_save_dir = os.getcwd() + model_save_dir
 
   dreamer_world_model = DreamerMA(dreamer_config, game)
-  rnad_model = RNaDDreamer(dreamer_world_model, rnad_config)
+  rnad_model = RNaDDreamerJoint(dreamer_world_model, rnad_config)
   dreamer_loss, rnad_loss = 0, 0
   for step in range(args.num_steps):
     if args.print_each > 0 and step % args.print_each == 0:
@@ -96,7 +96,12 @@ def joint_train_loop(args, game:JaxGame, ):
       model_file = model_save_dir + f"step_{step}.pkl"
       #TODO: Save just the RNaD model, or save both of them?
       save_model(rnad_model, model_file)
+    #TODO: How to handle the case of multiple
+    # Dreamer timesteps created and multiple
+    # starting points for RNaD required?
     for ds in range(args.dreamer_steps_each_step):
-      dreamer_loss = dreamer_world_model.world_model_train_step()
+      dreamer_loss, dreamer_timestep = dreamer_world_model.world_model_train_step()
+    #jax.tree_util.tree_map(lambda x: print(x.dtype), dreamer_timestep)
+    #breakpoint()
     for rs in range(args.rnad_steps_each_step):
-      rnad_loss = rnad_model.step_with_model()
+      rnad_loss = rnad_model.step(dreamer_timestep)

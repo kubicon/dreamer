@@ -15,7 +15,7 @@ import os
 from functools import partial
 
 from dreamer_ma import DreamerMA, DreamerMAOptimizers
-from networks import initialize_rnad_optimizers, initialize_joint_optimizers, RNaDOptimizers, JointOptimizers, RNaDNetwork, IsetDecoder, Predictor, LegalActionsNetwork, DynamicsPredictor, SequenceModel, JointIsetEncoder
+from networks import initialize_rnad_optimizers, RNaDOptimizers, RNaDNetwork, IsetDecoder, Predictor, LegalActionsNetwork, DynamicsPredictor, SequenceModel, JointIsetEncoder
 from train_utils import RNaDConfig, RNaDTimeStep, load_model, save_model
 from distributions import sample_categorical
 from games.jax_game import GameState
@@ -320,14 +320,8 @@ class RNaDDreamer():
     
     self.prev_network = RNaDNetwork(self.iset_size, self.actions, self.config.rnad_network_details[0], self.config.rnad_network_details[1], rngs=self.nnx_rngs)
     self._prev_network = RNaDNetwork(self.iset_size, self.actions, self.config.rnad_network_details[0], self.config.rnad_network_details[1], rngs=self.nnx_rngs)
-    
-    
-    if self.config.send_signal_to_dreamer:
-      self.optimizers = initialize_joint_optimizers(self.world_model.optimizers, self.config, self.iset_size, self.actions, self.nnx_rngs)
-      self.cached_step = nnx.cached_partial(self._jit_step_with_model, self.optimizers, self.prev_network, self._prev_network)
-    else:
-      self.optimizers = initialize_rnad_optimizers(self.config, self.iset_size, self.actions, self.nnx_rngs)
-      self.cached_step = nnx.cached_partial(self._jit_step, self.optimizers, self.prev_network, self._prev_network, self.world_model.optimizers)
+    self.optimizers = initialize_rnad_optimizers(self.config, self.iset_size, self.actions, self.nnx_rngs)
+    self.cached_step = nnx.cached_partial(self._jit_step, self.optimizers, self.prev_network, self._prev_network, self.world_model.optimizers)
     self.learner_steps = 0
     self.policy_switch_steps = 0
   
@@ -652,134 +646,6 @@ class RNaDDreamer():
     keys = jax.random.split(key, n)
     return keys
   
-
-
-  @partial(nnx.jit, static_argnums=(0,))
-  def update_parameters_and_model(
-    self,
-    optimizers: JointOptimizers,
-    prev_network: RNaDNetwork,
-    _prev_network: RNaDNetwork,
-    trajectory_key,
-    alpha,
-    update_net 
-  ):
-    """Same functionality as update parameters, but also
-    updates the world model. TODO: Lots of repeated code. Either 
-    try to merge these, or create new RNaD version for the joint training."""
-
-    def rnad_loss(
-      rnad_network: RNaDNetwork,
-      sequence_model: SequenceModel, 
-      dynamics: DynamicsPredictor,
-      predictor: Predictor, 
-      legal_network: LegalActionsNetwork, 
-      encoder: JointIsetEncoder, 
-      p1_iset_decoder:IsetDecoder,
-      p2_iset_decoder: IsetDecoder,
-      target_network: RNaDNetwork,
-      prev_network: RNaDNetwork,
-      _prev_network: RNaDNetwork,
-      trajectory_key,
-      alpha: float,
-    ):
-      timestep = self.sample_trajectories(trajectory_key, rnad_network, 
-                                          sequence_model,
-                                          dynamics,
-                                          predictor,
-                                          legal_network,
-                                          encoder,
-                                          p1_iset_decoder,
-                                          p2_iset_decoder)
-      # Per player vmap
-      per_player_net_apply = nnx.vmap(self._jit_get_network, in_axes=(None, 0, 0), out_axes=(0))
-      #Per trajectory and batch dimensions
-      vectorized_net_apply = nnx.vmap(nnx.vmap(per_player_net_apply, in_axes=(None, 0, 0), out_axes=(0)), in_axes=(None, 0, 0), out_axes=(0))
-      pi, v, log_pi, logit = vectorized_net_apply(rnad_network, timestep.obs, timestep.legal)
-      
-      _, v_target, _, _ = vectorized_net_apply(target_network, timestep.obs, timestep.legal)
-      _, _, log_pi_prev, _ = vectorized_net_apply(prev_network, timestep.obs, timestep.legal)
-      _, _, log_pi_prev_, _ = vectorized_net_apply(_prev_network, timestep.obs, timestep.legal)
-      
-
-      # This creates the regularization term for rewards
-      regularized_term = log_pi - (alpha * log_pi_prev + (1 - alpha) * log_pi_prev_) 
-      
-      expanded_valid = jnp.expand_dims(timestep.valid, (-1, -2))
-      
-      v_train_target, q_value = v_trace(v_target, expanded_valid, timestep.policy, pi, regularized_term, timestep.action, timestep.reward,
-                                        self.config.lambda_vtrace, self.config.c_vtrace, self.config.rho_vtrace,
-                                        self.config.eta, self.config.vtrace_eta, self.config.gamma_vtrace)
-      
-      # We multiply by 2, since each player acts
-      normalization = jnp.sum(timestep.valid) * 2 
-      v_loss = jnp.sum((expanded_valid * (v - lax.stop_gradient(v_train_target)) ** 2)) / (normalization + (normalization == 0))
-      
-      # Each Q is multiplied by product of importance_sampling of opponent and inverted sampling policy by the acting player.
-      # This computes counterfactual importance sampling
-      sampling_policy = jnp.sum(timestep.policy * timestep.action, axis=-1, keepdims=True)
-      network_policy = jnp.sum(pi * timestep.action, axis=-1, keepdims=True)
-      
-      # We do not take into account the player reaches, since infoset is always reached with the same prob
-      sampling_policy = jnp.prod(sampling_policy, axis=-2, keepdims=True)
-      
-      importance_sampling = network_policy / sampling_policy
-      
-      importance_sampling = jnp.concatenate((jnp.ones((1, *importance_sampling.shape[1:])), importance_sampling[:-1]), axis=0)
-      importance_sampling = jnp.cumprod(importance_sampling, axis=0)
-      importance_sampling = jnp.flip(importance_sampling, axis=-2)
-      
-      
-      loss_neurd = neurd_loss(logit, pi, q_value, timestep.legal, importance_sampling)
-      
-      # The multiplication by -1 is critical here, otherwise we would
-      # be minimizing the neurd term, but we want to maximize it.
-      neurd_loss_value = -jnp.sum(loss_neurd * expanded_valid) / (normalization + (normalization == 0))
-      #jax.debug.breakpoint()
-      return v_loss + neurd_loss_value
-      
-    loss, grads = nnx.value_and_grad(rnad_loss, argnums=(0 ,1, 2, 3, 4, 5, 6, 7))(
-      optimizers.rnad_optimizer.model,
-      optimizers.sequence_optimizer.model,
-      optimizers.dynamics_optimizer.model,
-      optimizers.predictor_optimizer.model,
-      optimizers.legal_actions_optimizer.model,
-      optimizers.encoder_optimizer.model,
-      optimizers.p1_decoder_optimizer.model,
-      optimizers.p2_decoder_optimizer.model, 
-      optimizers.rnad_target_optimizer.model,
-      prev_network,
-      _prev_network
-      , trajectory_key, alpha)
-
-    optimizers.rnad_optimizer.update(grads[0])
-    optimizers.sequence_optimizer.update(grads[1])
-    optimizers.dynamics_optimizer.update(grads[2])
-    optimizers.predictor_optimizer.update(grads[3])
-    optimizers.legal_actions_optimizer.update(grads[4])
-    optimizers.encoder_optimizer.update(grads[5])
-    optimizers.p1_decoder_optimizer.update(grads[6])
-    optimizers.p2_decoder_optimizer.update(grads[7])
-
-    rnad_graphdef, state = nnx.split(optimizers.rnad_optimizer.model)
-    _, state_target = nnx.split(optimizers.rnad_target_optimizer.model)
-    _, state_prev = nnx.split(prev_network)
-    _, _state_prev = nnx.split(_prev_network)
-
-    #This grad coupled with vanilla SGD optimizer 
-    # is equivalent to the EMA formula (1 - alpha) * state_target + alpha * state
-    target_grad = jax.tree.map(lambda a, b: a - b, state_target, state)
-    optimizers.rnad_target_optimizer.update(target_grad)
-      
-
-    state_prev, _state_prev = jax.lax.cond(
-        update_net,
-        lambda: (state_target, state_prev),
-        lambda: (state_prev, _state_prev))
-    prev_network = nnx.merge(rnad_graphdef, state_prev)
-    _prev_network = nnx.merge(rnad_graphdef, _state_prev)
-    return prev_network, _prev_network, loss
-  
   @partial(nnx.jit, static_argnums=(0,))
   def update_parameters(
     self,
@@ -889,28 +755,11 @@ class RNaDDreamer():
     prev_network, _prev_network, loss = self.update_parameters(
       optimizers, prev_network, _prev_network, timestep, alpha, update_regularization)
     return prev_network, _prev_network, loss, update_regularization
-  
-  @partial(nnx.jit, static_argnums=(0))
-  def _jit_step_with_model(self, optimizers: JointOptimizers, prev_network: RNaDNetwork, _prev_network: RNaDNetwork
-                , trajectory_key, learner_steps: int):
-    alpha, update_regularization = self._entropy_schedule(learner_steps)
-    prev_network, _prev_network, loss = self.update_parameters_and_model(
-      optimizers, prev_network, _prev_network, trajectory_key, alpha, update_regularization
-    )
-    return prev_network, _prev_network, loss, update_regularization
 
 
   def step(self):
     trajectory_key = self.get_next_rng_key()
     #self.prev_network, self._prev_network, loss, update_regularization =  self._jit_step(self.optimizers,self.prev_network, self._prev_network, self.world_model.optimizers,trajectory_key, self.learner_steps)
-    self.prev_network, self._prev_network, loss, update_regularization = self.cached_step(trajectory_key, self.learner_steps)
-    self.learner_steps += 1
-    self.policy_switch_steps += int(update_regularization)
-    return loss
-  
-  def step_with_model(self):
-    trajectory_key = self.get_next_rng_key()
-    #self.prev_network, self._prev_network, loss, update_regularization =  self._jit_step_with_model(self.optimizers, self.prev_network, self._prev_network, trajectory_key, self.learner_steps)
     self.prev_network, self._prev_network, loss, update_regularization = self.cached_step(trajectory_key, self.learner_steps)
     self.learner_steps += 1
     self.policy_switch_steps += int(update_regularization)

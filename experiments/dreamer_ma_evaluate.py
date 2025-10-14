@@ -9,7 +9,7 @@ import time
 import matplotlib.pyplot as plt
 
 from dreamer_ma import DreamerMA
-from rnad_dreamer import RNaDDreamer
+from rnad_dreamer_joint import RNaDDreamerJoint
 from train_utils import load_model
 from experiments.eval_utils import model_walk_test, cartesian_product, WalkCarry
 #from pyinstrument import Profiler
@@ -147,7 +147,7 @@ def main():
       model = load_model(model_path)
        #To allow for retrieving the world model of already trained RNaD
       # particularly relevant when training jointly.
-      if isinstance(model, RNaDDreamer):
+      if isinstance(model, RNaDDreamerJoint):
         plot_subdir_str = "compound"
         model = model.world_model
       elif not isinstance(model, DreamerMA):
@@ -157,7 +157,7 @@ def main():
       temp_model = load_model(model_path)
        #To allow for retrieving the world model of already trained RNaD
       # particularly relevant when training jointly.
-      if isinstance(temp_model, RNaDDreamer):
+      if isinstance(temp_model, RNaDDreamerJoint):
         temp_model = temp_model.world_model
       elif not isinstance(temp_model, DreamerMA):
         raise ValueError(f"The given model should be instance of RNaDDreamer or DreamerMA, not {model.__class__}")

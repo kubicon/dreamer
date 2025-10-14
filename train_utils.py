@@ -13,8 +13,6 @@ class RNaDConfig:
   
   use_learned_model: bool = True # Whether to use the learned Dreamer model for sampling. If
                                   # False, uses the original game environment. Just a debug flag that will be likely removed later.
-  send_signal_to_dreamer: bool = False #Whether to propagate gradients back to the dreamer
-                                        #world model. Used in single phase training.
 
   batch_size: int = 64
   

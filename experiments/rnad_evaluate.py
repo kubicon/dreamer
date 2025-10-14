@@ -11,7 +11,8 @@ import matplotlib.pyplot as plt
 from train_utils import load_model
 from experiments.eval_utils import cartesian_product, stringify, find_closest_index, create_iset_map, unroll_chance_node
 from games.jax_game import JaxGame, GameState
-from rnad_dreamer import RNaDDreamer, RNaDConfig, JointOptimizers
+from rnad_dreamer import RNaDDreamer, RNaDConfig
+from rnad_dreamer_joint import RNaDDreamerJoint
 
 parser = ArgumentParser()
 
@@ -555,13 +556,14 @@ def test_loaded(args):
     # else it will break
     if first:
       model = load_model(model_path)
-      assert isinstance(model, RNaDDreamer), f"The given model should be an instance of RNaDDreamer, not {model.__class__}"
-      if isinstance(model.optimizers, JointOptimizers):
+      if isinstance(model, RNaDDreamerJoint):
         plot_subdir_str = "compound"
+      elif not isinstance(model, RNaDDreamer): 
+        assert False, f"Loaded model should be an instance of RNaDDreamer or RNaDDreamerJoint not {model.__class__}"
       first=False
     else:
       temp_model = load_model(model_path)
-      assert isinstance(temp_model, RNaDDreamer), f"The given model should be an instance of RNaDDreamer, not {model.__class__}"
+      assert isinstance(temp_model, RNaDDreamer) or isinstance(model, RNaDDreamerJoint), f"The given model should be an instance of RNaDDreamer or RNaDDreamerJoint, not {model.__class__}"
       #TODO: Updating this way still forces retracing of get_info and
       # initialize_structures of the game, since it is called in init. In general
       # we just need the state of the optimizers object from the model
@@ -623,7 +625,11 @@ def test_retrain(args):
     raise FileNotFoundError(f"Model file {model_path} does not exist.")
 
   model = load_model(model_path)
-  assert isinstance(model, RNaDDreamer), f"Loaded model should be an instance of RNaDDreamer not {model.__class__}"
+  joint = False
+  if isinstance(model, RNaDDreamerJoint):
+    joint = True
+  elif not isinstance(model, RNaDDreamer): 
+    assert False, f"Loaded model should be an instance of RNaDDreamer or RNaDDreamerJoint not {model.__class__}"
   config = model.config
   neurd_steps = args.neurd_steps
   policy_steps = args.policy_steps
@@ -659,7 +665,7 @@ def test_retrain(args):
   p1_exploitabilities = []
   p2_exploitabilities = []
   print(f"Config {config}")
-  clean_model = RNaDDreamer(model.world_model, new_config)
+  clean_model = RNaDDreamerJoint(model.world_model, new_config) if joint else RNaDDreamer(model.world_model, new_config)
   print(f"Step {clean_model.learner_steps}")
   print(f"Policy switch step {clean_model.policy_switch_steps}")
   p2_br_val, p1_br_val, p1_br, p2_br = model_best_response(clean_model)
@@ -703,7 +709,7 @@ def test_nash(args, saved_nash_path: str):
   print(f"Evaluating policy of model loaded from {model_path} against nash policy loaded from {saved_nash_path}")
 
   model = load_model(model_path)
-  assert isinstance(model, RNaDDreamer), f"Loaded model should be an instance of RNaDDreamer not {model.__class__}"
+  assert isinstance(model, RNaDDreamer) or isinstance(model, RNaDDreamerJoint), f"The given model should be an instance of RNaDDreamer or RNaDDreamerJoint, not {model.__class__}"
   if not model.config.use_learned_model:
     print(f"The model is learned on the real game {model.world_model.game.game_name()}")
   

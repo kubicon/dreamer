@@ -137,8 +137,8 @@ class DreamerMA():
       action, action_oh = vectorized_sample_action(action_key, pi)
       timestep = TimeStep(
         obs = obs,
-        legal = carry.legal_actions,
-        action = action_oh,
+        legal = carry.legal_actions.astype(jnp.int8),
+        action = action_oh.astype(jnp.int8),
         policy = pi,
         reward = carry.reward,
         valid = carry.valid,
@@ -169,13 +169,13 @@ class DreamerMA():
       )
         
       
-      timestep = jax.tree.map(lambda t, f: jnp.where(carry.valid, t, f), timestep, self.example_timestep)
+      timestep = jax.tree.map(lambda t, f: jnp.where(carry.valid, t, f).astype(t.dtype), timestep, self.example_timestep)
       
       return new_carry, timestep, is_chance
     _, timestep, is_chance = _sample_trajectory(init_carry, trajectory_key)
     #This is used to remove the chance nodes from the trajectory
     non_chance = jnp.nonzero(~is_chance, size=self.non_chance_trajectory_max)[0]
-    filtered_timestep = jax.tree_util.tree_map(lambda x: jnp.take_along_axis(x, jnp.expand_dims(non_chance, axis=range(1, x.ndim)), axis=0), timestep)
+    filtered_timestep = jax.tree_util.tree_map(lambda x: jnp.take_along_axis(x, jnp.expand_dims(non_chance, axis=range(1, x.ndim)), axis=0).astype(x.dtype), timestep)
     #[Trajectory, ...]
     return filtered_timestep
   
@@ -286,21 +286,25 @@ class DreamerMA():
     trajectory_key, train_key = jax.random.split(rng_key)
     timestep = self.sample_trajectories(self.config.batch_size, trajectory_key)
     loss = self.update_world_model(optimizers,timestep, train_key)
-    return loss
+    #Returns loss and the starting points in the trajectory.
+    # This is required for the joint training
+    #TODO: Change this to sampling a point in the trajectory,
+    # Rather than picking the first one always
+    return loss, timestep
     
 
   def world_model_train_step(self):
     rng_key = self.generate_key()
     #return self.world_model_train(self.optimizers, rng_key)
-    loss = self.cached_train(rng_key)
+    loss, timestep = self.cached_train(rng_key)
     self.learner_steps += 1
-    return loss
+    return loss, timestep
 
   def train_world_model(self, model_save_dir:str, num_steps:int, print_each: int = -1, save_each: int = -1):
      
     for i in range(num_steps):
       rng_key = self.generate_key() 
-      loss = self.cached_train(rng_key)
+      loss, timestep = self.cached_train(rng_key)
       if print_each > 0 and i % print_each == 0:
         print(f"Step {i}, Loss: {loss}")
       if save_each > 0 and i % save_each == 0:
