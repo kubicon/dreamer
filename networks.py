@@ -248,15 +248,6 @@ class LegalActionsNetwork(nnx.Module):
 #     return reward, done, legal
   
   
-@chex.dataclass(frozen=True)
-class DreamerMAOptimizers():
-  sequence_optimizer: nnx.Optimizer
-  encoder_optimizer: nnx.Optimizer
-  p1_decoder_optimizer: nnx.Optimizer
-  p2_decoder_optimizer: nnx.Optimizer
-  dynamics_optimizer: nnx.Optimizer
-  predictor_optimizer: nnx.Optimizer
-  legal_actions_optimizer: nnx.Optimizer
 
 
 @chex.dataclass(frozen=True)
@@ -268,6 +259,16 @@ class DreamerOptimizers():
   predictor_optimizer: nnx.Optimizer
 
 
+
+@chex.dataclass(frozen=True)
+class DreamerMAOptimizers():
+  sequence_optimizer: nnx.Optimizer
+  encoder_optimizer: nnx.Optimizer
+  p1_decoder_optimizer: nnx.Optimizer
+  p2_decoder_optimizer: nnx.Optimizer
+  dynamics_optimizer: nnx.Optimizer
+  predictor_optimizer: nnx.Optimizer
+  legal_actions_optimizer: nnx.Optimizer
 
 @chex.dataclass(frozen=True)
 class RNaDOptimizers():

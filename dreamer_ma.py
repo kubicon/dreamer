@@ -205,7 +205,10 @@ class DreamerMA():
         flattened_action = jnp.reshape(action, (*deterministic_state.shape[:-2], -1))
         gru_input = jnp.concatenate([deterministic_state.reshape(*deterministic_state.shape[:-2], -1), flattened_action], axis=-1) 
         new_hidden = sequence_model(hidden_state, gru_input)
-        preds = PredictionStepWithLegal(repr_state = stochastic_state,
+        preds = PredictionStepWithLegal(
+                                hidden_state = hidden_state,
+                                repr_state = stochastic_state,
+                                deter_state = deterministic_state,
                                 decoded_obs = decoded_obs,
                                 reward_dist_logit = reward,
                                 done_logit = done,
@@ -219,6 +222,10 @@ class DreamerMA():
       vectorized_predict = nnx.vmap(_predict_over_timestep, in_axes=(0, 1, None, None, None, None, None, None, None), out_axes=(0, 1))
       _, predictions = vectorized_predict(init_hidden, xs, sequence_model, encoder, p1_decoder, p2_decoder, dynamics_model, predictor, legal_actions_network) 
 
+      init_action = timestep.action[0, 0]
+      init_deter = predictions.deter_state[0, 0]
+      flattened_action = jnp.reshape(init_action, (*init_deter.shape[:-2], -1))
+      gru_input = jnp.concatenate([init_deter.reshape(*init_deter.shape[:-2], -1), flattened_action], axis=-1) 
       #[Trajectory, Batch, num_players, obs_size]
       reconstruction_loss = -get_normal_log_prob(predictions.decoded_obs, timestep.obs)
       l_pred += get_loss_mean_with_mask(reconstruction_loss, timestep.valid[..., None, None])
@@ -250,12 +257,20 @@ class DreamerMA():
       repr_loss = kl_divergence(posterior, jax.lax.stop_gradient(prior))
       l_rep += jnp.maximum(self.config.free_bits_clip_threshold, get_loss_mean_with_mask(repr_loss, timestep.valid))
 
-      return self.config.beta_prediction * l_pred + self.config.beta_dynamics * l_dyn + self.config.beta_representation * l_rep
+      # jax.debug.breakpoint()
+      
+      return self.config.beta_prediction * l_pred + self.config.beta_dynamics * l_dyn + self.config.beta_representation * l_rep, predictions
   
-    loss, grad = nnx.value_and_grad(world_model_loss, argnums=(0, 1, 2, 3, 4, 5, 6))(optimizers.sequence_optimizer.model, optimizers.encoder_optimizer.model, optimizers.p1_decoder_optimizer.model, 
-                                                                                  optimizers.p2_decoder_optimizer.model, optimizers.dynamics_optimizer.model, optimizers.predictor_optimizer.model,
-                                                                                  optimizers.legal_actions_optimizer.model)
+    func_data, grad = nnx.value_and_grad(world_model_loss, has_aux=True, argnums=(0, 1, 2, 3, 4, 5, 6))(
+                    optimizers.sequence_optimizer.model, 
+                    optimizers.encoder_optimizer.model, 
+                    optimizers.p1_decoder_optimizer.model, 
+                    optimizers.p2_decoder_optimizer.model, 
+                    optimizers.dynamics_optimizer.model, 
+                    optimizers.predictor_optimizer.model,
+                    optimizers.legal_actions_optimizer.model)
     
+    loss, pred_step = func_data
     optimizers.sequence_optimizer.update(grad[0])
     optimizers.encoder_optimizer.update(grad[1])
     optimizers.p1_decoder_optimizer.update(grad[2])
@@ -264,7 +279,7 @@ class DreamerMA():
     optimizers.predictor_optimizer.update(grad[5])
     optimizers.legal_actions_optimizer.update(grad[6])
     
-    return loss
+    return loss, pred_step
   
 
   @partial(nnx.jit, static_argnums=(0))
@@ -285,26 +300,28 @@ class DreamerMA():
   def world_model_train(self, optimizers, rng_key):
     trajectory_key, train_key = jax.random.split(rng_key)
     timestep = self.sample_trajectories(self.config.batch_size, trajectory_key)
-    loss = self.update_world_model(optimizers,timestep, train_key)
+    loss, pred_step = self.update_world_model(optimizers,timestep, train_key)
     #Returns loss and the starting points in the trajectory.
-    # This is required for the joint training
-    #TODO: Change this to sampling a point in the trajectory,
-    # Rather than picking the first one always
-    return loss, timestep
+    # This is required for the joint training. Also return the 
+    # original timestep to allow training on real data
+    return loss, timestep, pred_step
     
 
   def world_model_train_step(self):
+    #_, p1_decoder_state = nnx.split(self.optimizers.p1_decoder_optimizer.model)
+    #jax.debug.breakpoint()
     rng_key = self.generate_key()
     #return self.world_model_train(self.optimizers, rng_key)
-    loss, timestep = self.cached_train(rng_key)
+    loss, timestep, pred_step = self.cached_train(rng_key)
+    #loss, timestep, pred_step = self.world_model_train(self.optimizers, rng_key)
     self.learner_steps += 1
-    return loss, timestep
+    return loss, timestep, pred_step
 
   def train_world_model(self, model_save_dir:str, num_steps:int, print_each: int = -1, save_each: int = -1):
      
     for i in range(num_steps):
       rng_key = self.generate_key() 
-      loss, timestep = self.cached_train(rng_key)
+      loss, timestep, pred_step = self.cached_train(rng_key)
       if print_each > 0 and i % print_each == 0:
         print(f"Step {i}, Loss: {loss}")
       if save_each > 0 and i % save_each == 0:
@@ -336,6 +353,9 @@ class DreamerMA():
     self.jax_rngs = state["jax_rngs"]
     self.optimizers = self.update_nnx(self.optimizers, state["optimizers"])
     self.learner_steps = state["steps"]
+    #Necessary for continuing to train. Otherwise it will continue to train on
+    # the newly initialized parameters
+    self.cached_train = nnx.cached_partial(self.world_model_train, self.optimizers)
 
   @partial(nnx.jit, static_argnums=(0, 5, 6))
   def get_predictor(self, predictor_model: Predictor, legal_model: LegalActionsNetwork, 
@@ -364,7 +384,7 @@ class DreamerMA():
     done_prob = nnx.sigmoid(done_logit)
     terminal = done_prob >= terminal_threshold
     legal_prob = nnx.sigmoid(legal_logit)
-    legal_actions = legal_prob >= legal_threshold
+    legal_actions = (legal_prob >= legal_threshold).astype(jnp.int8)
     return reward, terminal[0], legal_actions
   
   @partial(nnx.jit, static_argnums=(0))

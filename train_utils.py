@@ -8,46 +8,6 @@ import pickle
 from typing import Sequence, Tuple
 
 
-@chex.dataclass(frozen=True)
-class RNaDConfig:
-  
-  use_learned_model: bool = True # Whether to use the learned Dreamer model for sampling. If
-                                  # False, uses the original game environment. Just a debug flag that will be likely removed later.
-
-  batch_size: int = 64
-  
-  #Ordered as hidden layer size, num hidden layers
-  rnad_network_details: Tuple[int, int] = (256, 1)
-  
-  entropy_schedule_repeats: Sequence[int] = (1,)
-  entropy_schedule_size: Sequence[int] = (1000,)
-
-  eta: float = 0.2 #Regularization strenght
-  vtrace_eta: float = 0.2 #Strenght of the additional KL-regularization in V-trace
-
-  #V-trace parameters
-  rho_vtrace: float = 1.0 # Clipping parameter. Affects to which policy estimate V-trace converges. Inf means convergence to the estimate for the learned policy
-  c_vtrace: float = 1.0 # Clipping parameter
-  gamma_vtrace: float = 1.0 # Discount factor
-  lambda_vtrace: float = 1.0 #Same as TD-learning lambda
-
-  #NeuRD parameters
-  neurd_clip: float = 10000
-  neurd_threshold: float = 2.0
-
-
-  sampling_epsilon: float = 0.0
-  state_sample_threshold: float = 0.05 #A threshold when sampling states. The outcomes for
-                                        #each categorical below this threshold are ignored (or, specificaly a minimum
-                                        # of this threshold and the lowest of max probability outcomes of the categoricals). 
-  
-  learning_rate: float = 3e-4
-  target_network_update: float = 1e-3
-
-  seed: int = 42
-  network_seed: int = 99
-
-
 def symlog(x: chex.Array):
   return jnp.sign(x) * jnp.log(jnp.abs(x) + 1)
 
@@ -105,7 +65,9 @@ class PredictionStep():
 
 @chex.dataclass(frozen=True)
 class PredictionStepWithLegal():
+  hidden_state: chex.Array
   repr_state: chex.Array
+  deter_state: chex.Array
   decoded_obs: chex.Array
   reward_dist_logit: chex.Array
   done_logit: chex.Array
@@ -117,10 +79,10 @@ class PredictionStepWithLegal():
 class RNaDTimeStep():
   
   obs: chex.Array = () # [..., Player, iset_dim] for multi agent or [..., obs_dim] for single_agent
-  legal: chex.Array = () # [..., Player, A] for multi agent or [..., A] for single_agent
+  legal: chex.Array = () # [..., Player, A] Legal actions in the given state
   
-  action: chex.Array = () # [..., Player, A] for multi agent or [..., A] for single agent
-  policy: chex.Array = () # [..., Player, A] for multi agent or [..., A] for single agent
+  action: chex.Array = () # [..., Player, A] action sampled at the given state
+  policy: chex.Array = () # [..., Player, A] =policy at the given state
   
   reward: chex.Array = () # [...] Reward after playing an action
   valid: chex.Array = () # [...] Flag determining, whether we should train in this state
@@ -134,11 +96,58 @@ class TimeStep():
   action: chex.Array = () # [..., Player, A] for multi agent or [..., A] for single agent
   policy: chex.Array = () # [..., Player, A] for multi agent or [..., A] for single agent
   
-  reward: chex.Array = () # [...] Reward after playing an action
+  reward: chex.Array = () # [...] Reward for reaching a state
   valid: chex.Array = () # [...] Flag determining, whether we should train in this state
-  terminal: chex.Array = () #[...] Whether state after playing an action was terminal
+  terminal: chex.Array = () #[...] Flag determining whether the state is terminal
 
 
+
+
+@chex.dataclass(frozen=True)
+class RNaDConfig:
+  
+  use_learned_model: bool = True # Whether to use the learned Dreamer model for sampling. If
+                                  # False, uses the original game environment. Just a debug flag that will be likely removed later.
+
+  batch_size: int = 64
+
+  beta_imagination: float = 1.0
+  beta_real: float = 0.3 # Coeficients for the loss parts. Beta imagination is used for Dreamer
+                          # unrolled trajectories and beta real for trajectories from the real environment
+                          # Used only for joint training.
+  
+  #Ordered as hidden layer size, num hidden layers
+  rnad_network_details: Tuple[int, int] = (256, 1)
+  
+  entropy_schedule_repeats: Sequence[int] = (1,)
+  entropy_schedule_size: Sequence[int] = (1000,)
+
+  eta: float = 0.2 #Regularization strenght
+  vtrace_eta: float = 0.2 #Strenght of the additional KL-regularization in V-trace
+
+  #V-trace parameters
+  rho_vtrace: float = 1.0 # Clipping parameter. Affects to which policy estimate V-trace converges. Inf means convergence to the estimate for the learned policy
+  c_vtrace: float = 1.0 # Clipping parameter
+  gamma_vtrace: float = 1.0 # Discount factor
+  lambda_vtrace: float = 1.0 #Same as TD-learning lambda
+
+  #NeuRD parameters
+  neurd_clip: float = 10000
+  neurd_threshold: float = 2.0
+
+
+  sampling_epsilon: float = 0.0
+  state_sample_threshold: float = 0.05 #A threshold when sampling states. The outcomes for
+                                        #each categorical below this threshold are ignored (or, specificaly a minimum
+                                        # of this threshold and the lowest of max probability outcomes of the categoricals). 
+  terminal_threshold:float =  0.5 #Thresholds when to consider the state terminal, or the actions
+  legal_threshold: float = 0.5    # Legal, when we take the sigmoid over the Dreamer produced logits.
+  
+  learning_rate: float = 3e-4
+  target_network_update: float = 1e-3
+
+  seed: int = 42
+  network_seed: int = 99
 
 
 @chex.dataclass(frozen=True)

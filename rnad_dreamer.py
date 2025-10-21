@@ -275,7 +275,7 @@ def v_trace(
     init=init_carry,
     xs=(importance_sampling, v, q_reward, entropy_reward, weighted_regularization_term, valid, inverted_sampling, action_oh),
     reverse=True
-  ) 
+  )
   return v_target, q_value
   
 

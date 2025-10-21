@@ -39,7 +39,7 @@ def add_dreamer_arguments(parser: ArgumentParser, multi_agent: bool = True,
     parser.add_argument("--legal_hidden_size", type=int, default=256, help="Size of the hidden layer in the legal actions network")
     parser.add_argument("--legal_hidden_layers", type=int, default=1, help="Number of hidden layers in the legal actions network")
   if joint_train:
-    parser.add_argument("--dreamer_steps_each_step", type=int, default=100, help="How many Dreamer steps to perform in each step of the main algorithm loop.")
+    parser.add_argument("--dreamer_steps_each_step", type=int, default=1, help="How many Dreamer steps to perform in each step of the main algorithm loop.")
   return parser
 
 
@@ -53,8 +53,16 @@ def add_rnad_arguments(parser: ArgumentParser, joint_train: bool =False) ->Argum
   parser.add_argument("--eta", type=float, default=0.2, help="Strenght of the regularization in RNaD. Used for the reward transformation and the KL regularization for V-trace.")
   parser.add_argument("--vtrace_eta", type=float, default=0.2, help="Strenght of the additional KL regularization term in V-trace.")
   parser.add_argument("--sampling_epsilon", type=float, default=0.0, help="Defines mix of uniform policy to the network learned policy during trajectory sampling.")
-  parser.add_argument("--state_sample_threshold", type=float, default=0.05, help="Threshold for the stochastic state sampling. If the probability of a class is below this threshold, it is not sampled.")
   parser.add_argument("--use_learned_model", type=bool, default=True, help="Whether to use the Dreamer learned model for trajectory sampling. If not, trajectories are sampled from the game. Just for debugging.")
+
+  #Dreamer model extraction parameters
+  parser.add_argument("--state_sample_threshold", type=float, default=0.05, help="Threshold for the stochastic state sampling. If the probability of a class is below this threshold, it is not sampled.")
+  parser.add_argument("--terminal_threshold", type=float, default=0.5, help="How much probability must the softmaxed logit have, to consider the state terminal.")
+  parser.add_argument("--legal_threshold", type=float, default=0.5, help="How much probability must the softmaxed logit have, to consider the action legal.")
+
+  #Loss coefficients
+  parser.add_argument("--beta_imagination", type=float, default=1.0, help="Coefficient for the loss on Dreamer imagined trajectories.")
+  parser.add_argument("--beta_real", type=float, default=0.3, help="Coefficient for the loss on trajectories sampled from the real environment.")
 
   diff_string = "rnad_" if joint_train else ""
   parser.add_argument(f"--{diff_string}batch_size", type=int, default=32, help="Batch size for training")
@@ -82,6 +90,7 @@ def add_rnad_arguments(parser: ArgumentParser, joint_train: bool =False) ->Argum
   parser.add_argument("--network_hidden_layers", type=int, default=1, help="Number of stacked hidden layers in the RNaD network")
 
   if not joint_train:
+    #Complete path to restore the whole model
     ## World model path
     parser.add_argument("--dreamer_dir", type=str, default="trained_networks/dreamer/goofspiel_3/seed99/network_seed99", help="Path to where is the saved Dreamer trained world model") 
     parser.add_argument("--model_restore_step", type=int, default=1000, help="Which saved step of the Dreamer world model to restore.")
@@ -97,8 +106,10 @@ def prepare_experiment_parser(multi_agent: bool = True):
   parser = ArgumentParser()
   parser.add_argument("--num_steps", type=int, default=1001, help="Number of training steps")
   parser.add_argument("--save_each", type=int, default=100, help="Save model every N steps")
+  parser.add_argument("--save_first", action="store_true", help="A flag whether to save the initial state of the model.")
   parser.add_argument("--print_each", type=int, default=100, help="Print loss every N steps")
   parser.add_argument("--model_save_dir", type=str, default="", help="Directory to save the trained model")
+  parser.add_argument("--saved_model_file", type=str, default="", help="File with the complete model. Used for continuing to train it.")
   if not multi_agent:
     parser = add_dreamer_arguments(parser, multi_agent=False, joint_train=False)
     return parser
