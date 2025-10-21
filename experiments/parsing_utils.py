@@ -18,8 +18,12 @@ def add_dreamer_arguments(parser: ArgumentParser, multi_agent: bool = True,
   parser.add_argument(f"--{diff_string}batch_size", type=int, default=32, help="Batch size for training")
   parser.add_argument(f"--{diff_string}learning_rate", type=float, default=3e-4, help="Learning rate for the optimizer")
   parser.add_argument(f"--{diff_string}network_seed", type=int, default=-1, help="Random seed for network initialization")
-  parser.add_argument(f"--{diff_string}trajectory_seed", type=int, default=-1, help="Random seed for trajectory generation")
+  parser.add_argument(f"--{diff_string}model_seed", type=int, default=-1, help="Random seed for trajectory generation")
 
+  #Replay buffer parameters
+  parser.add_argument("--replay_trajectory_seed", type=int, default= -1, help="Seed for sampling trajectories out of environment in the replay buffer.")
+  parser.add_argument("--replay_sample_seed", type=int, default=-1, help="Seed for sampling trajectories stored in the replay buffer.")
+  parser.add_argument("--replay_size", type=int, default=32, help="Size of the replay buffer.")
   ## Loss function coefficients
   parser.add_argument("--beta_prediction", type=float, default=1, help="The beta coefficient for the prediction loss")
   parser.add_argument("--beta_dynamics", type=float, default=1, help="The beta coefficient for the dynamics loss")
@@ -110,6 +114,7 @@ def prepare_experiment_parser(multi_agent: bool = True):
   parser.add_argument("--print_each", type=int, default=100, help="Print loss every N steps")
   parser.add_argument("--model_save_dir", type=str, default="", help="Directory to save the trained model")
   parser.add_argument("--saved_model_file", type=str, default="", help="File with the complete model. Used for continuing to train it.")
+  parser.add_argument("--replay_fraction", type=float, default=1.0, help="A fraction defining the ratio of real steps collection. For example: 2 means 2 steps each step, 0.5 means 1 step each two steps etc.")
   if not multi_agent:
     parser = add_dreamer_arguments(parser, multi_agent=False, joint_train=False)
     return parser
@@ -122,7 +127,7 @@ def prepare_experiment_parser(multi_agent: bool = True):
   rnad_parser = subparsers.add_parser(name="rnad", help="Train only the RNaD algorithm on already trained Dreamer model.")
   rnad_parser = add_rnad_arguments(rnad_parser, joint_train=False)
 
-  joint_parser = subparsers.add_parser(name="joint", help="Train both algorithms jointly. First performing K Dreamer model steps and then L RNaD steps (typically l = 1).")
+  joint_parser = subparsers.add_parser(name="joint", help="Train both algorithms jointly. First performing K Dreamer model steps and then L RNaD steps (typically L = 1).")
   joint_parser = add_dreamer_arguments(joint_parser, multi_agent=True, joint_train=True)
   joint_parser = add_rnad_arguments(joint_parser, joint_train=True)
 

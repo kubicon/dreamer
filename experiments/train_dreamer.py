@@ -6,26 +6,31 @@ from games.jax_game import JaxGame
 from dreamer import DreamerConfig, Dreamer
 from dreamer_ma import DreamerMAConfig, DreamerMA
 from train_utils import load_model
+from replay_buffer import ReplayBuffer
+
+def _get_seed(seed:int):
+  if seed == -1:
+    return np.random.randint(0, 2**32 - 1)
+  return seed
 
 def train_model_ma(args, game:JaxGame):
   """Trains the multi-agent version of Dreamer on a given
   two player zero sum game. Args must contain all necessary parameters
   as created by create_dreamer_parser(multi_agent=True)."""
   assert game.num_players() == 2, f"This version of dreamer needs a 2 player zero-sum game, instead got {game.num_players()} player game."
-  network_seed = args.network_seed
-  trajectory_seed = args.trajectory_seed
-  if network_seed == -1:
-    network_seed = np.random.randint(0, 2**32 - 1)
-  if trajectory_seed == -1:
-    trajectory_seed = np.random.randint(0, 2**32 - 1)
-  print(f"Using network seed: {network_seed}, trajectory seed: {trajectory_seed}")
+  network_seed = _get_seed(args.network_seed)
+  model_seed = _get_seed(args.model_seed)
+  trajectory_seed = _get_seed(args.replay_trajectory_seed)
+  buffer_sample_seed = _get_seed(args.replay_sample_seed)
+
+  print(f"Using network seed: {network_seed}, model seed: {model_seed}, trajectory seed: {trajectory_seed}, replay sample seed: {buffer_sample_seed}")
   if args.saved_model_file and os.path.exists(args.saved_model_file):
     model = load_model(args.saved_model_file)
     assert isinstance(model, DreamerMA), f"The loaded model should be an instance of DreamerMA, not {model.__class__}"
   else:
     config = DreamerMAConfig(
         batch_size=args.batch_size,
-        seed=args.trajectory_seed,
+        seed=model_seed,
 
 
         #Weights of the individual loss terms of the world model
@@ -46,11 +51,12 @@ def train_model_ma(args, game:JaxGame):
         legal_actions_network_details = (args.legal_hidden_size, args.legal_hidden_layers),
 
         learning_rate = args.learning_rate,
-        rng_seed = args.network_seed
+        rng_seed = network_seed
     )
+    buffer = ReplayBuffer(game, trajectory_seed, buffer_sample_seed, args.replay_size)
     model = DreamerMA(
         config=config,
-        game = game,
+        buffer=buffer,
     )
   model_save_dir = args.model_save_dir
   game_name = game.game_name()
@@ -59,28 +65,26 @@ def train_model_ma(args, game:JaxGame):
   params_str = f'{empty.join(f"_{value}" for key, value in game_params.items())}' 
 
   if not model_save_dir:
-      model_save_dir = f"/trained_networks/dreamer/{game_name}{params_str}/seed{trajectory_seed}/network_seed{network_seed}/"
+      model_save_dir = f"/trained_networks/dreamer/{game_name}{params_str}/seed{model_seed}/network_seed{network_seed}/"
       model_save_dir = os.getcwd() + model_save_dir
-  model.train_world_model(model_save_dir, args.num_steps, args.print_each, args.save_each)
+  model.train_world_model(model_save_dir, args.num_steps, args.replay_fraction, args.print_each, args.save_each)
 
 def train_model(args, game:JaxGame):
   """Train a single agent Dreamer model on a given
   single agent environment. Args must contain all necessary parameters
   as created by create_dreamer_parser(multi_agent=False) """
-  network_seed = args.network_seed
-  trajectory_seed = args.trajectory_seed
-  if network_seed == -1:
-    network_seed = np.random.randint(0, 2**32 - 1)
-  if trajectory_seed == -1:
-    trajectory_seed = np.random.randint(0, 2**32 - 1)
-  print(f"Using network seed: {network_seed}, trajectory seed: {trajectory_seed}")
+  network_seed = _get_seed(args.network_seed)
+  model_seed = _get_seed(args.model_seed)
+  trajectory_seed = _get_seed(args.replay_trajectory_seed)
+  buffer_sample_seed = _get_seed(args.replay_sample_seed)
+  print(f"Using network seed: {network_seed}, model seed: {model_seed}, trajectory seed: {trajectory_seed}, replay sample seed: {buffer_sample_seed}")
   if args.saved_model_file and os.path.exists(args.saved_model_file):
     model = load_model(args.saved_model_file)
     assert isinstance(model, Dreamer), f"The loaded model should be an instance of Dreamer, not {model.__class__}"
   else:
     config = DreamerConfig(
         batch_size=args.batch_size,
-        seed=args.trajectory_seed,
+        seed=model_seed,
 
 
         #Weights of the individual loss terms of the world model
@@ -101,11 +105,12 @@ def train_model(args, game:JaxGame):
         predictor_network_details = (args.predictor_hidden_size, args.predictor_hidden_layers),
 
         learning_rate = args.learning_rate,
-        rng_seed = args.network_seed
+        rng_seed = network_seed
     )
+    buffer = ReplayBuffer(game, trajectory_seed, buffer_sample_seed, args.replay_size)
     model = Dreamer(
         config=config,
-        game = game,
+        buffer = buffer,
     )
   
   model_save_dir = args.model_save_dir
@@ -114,7 +119,7 @@ def train_model(args, game:JaxGame):
   game_params = game.params_dict()
   params_str = f'{empty.join(f"_{value}" for key, value in game_params.items())}'
   if not model_save_dir:
-      model_save_dir = f"/trained_networks/dreamer/{game_name}{params_str}/seed{trajectory_seed}/network_seed{network_seed}/"
+      model_save_dir = f"/trained_networks/dreamer/{game_name}{params_str}/seed{model_seed}/network_seed{network_seed}/"
       model_save_dir = os.getcwd() + model_save_dir
 
   model.train_world_model(model_save_dir, args.num_steps, args.print_each, args.save_each)

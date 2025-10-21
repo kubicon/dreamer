@@ -155,6 +155,7 @@ class DreamerConfig():
   batch_size: int
   seed: int
 
+
   hidden_state_size: int #Size of the RNN hidden state
   encoded_classes: int # Number of classes for each categorical distribution in state
   encoded_categories: int # Number of categorical distributions in state
@@ -183,6 +184,7 @@ class DreamerConfig():
 class DreamerMAConfig():
   batch_size: int
   seed: int
+
 
   hidden_state_size: int #Size of the RNN hidden state
   encoded_classes: int # Number of classes for each categorical distribution in state

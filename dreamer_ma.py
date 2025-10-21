@@ -9,7 +9,7 @@ from functools import partial
 from train_utils import DreamerMAConfig, get_reference_policy, TimeStep, get_loss_mean_with_mask, PredictionStepWithLegal, symexp, save_model
 from distributions import get_normal_log_prob, get_bin_log_prob, kl_divergence, sample_categorical
 from networks import initialize_ma_dreamer_optimizers, DreamerMAOptimizers, SequenceModel, JointIsetEncoder, IsetDecoder, DynamicsPredictor, Predictor, LegalActionsNetwork
-from games.jax_game import JaxGame, GameState
+from replay_buffer import ReplayBuffer
 
 
 @chex.dataclass(frozen=True)
@@ -24,11 +24,12 @@ class DreamerMAGradients():
 
 
 class DreamerMA():
-  """The actual model that handles the dreamer algorithm training.
-  For now only the world model networks are used and actor/critic networks are not trained."""
-  def __init__(self, config: DreamerMAConfig, game: JaxGame):
+  def __init__(self, config: DreamerMAConfig, buffer: ReplayBuffer):
+    """The actual model that handles the dreamer algorithm training.
+    For now only the world model networks are used and actor/critic networks are not trained."""
     self.config = config
-    self.game = game
+    self.game = buffer.game
+    self.buffer = buffer
     self.init()
     
     
@@ -79,105 +80,6 @@ class DreamerMA():
     keys = jax.random.split(split_key, num_keys)
     return keys
     
-
-  @chex.assert_max_traces(n=1)
-  @partial(nnx.jit, static_argnums=(0, 1))
-  def sample_trajectories(self,  batch_size, key):
-    keys = jax.random.split(key, batch_size)
-    return nnx.vmap(self.sample_trajectory, in_axes=0, out_axes=1)(keys)
-  
-
-  @chex.assert_max_traces(n=1)
-  @partial(nnx.jit, static_argnums=0)
-  def sample_trajectory(self, key) ->TimeStep:
-    trajectory_key = jax.random.split(key, self.trajectory_max)
-  
-    actions = self.action_dimension
-    
-    game_state, legal_actions = self.game.initialize_structures()
-    
-    @chex.dataclass(frozen=True)
-    class SampleTrajectoryCarry:
-      game_state: GameState
-      legal_actions: chex.Array
-      reward: chex.Array
-      terminal: bool
-      valid: bool
-      
-    init_carry = SampleTrajectoryCarry(
-      game_state = game_state,
-      legal_actions = legal_actions,
-      reward = jnp.array(0),
-      terminal = jnp.array(False),
-      valid = jnp.array(True)
-    )
-    
-    
-    @nnx.jit
-    def choice_wrapper(key, p):
-      action = jax.random.choice(key, actions, p=p)
-      action_oh = jax.nn.one_hot(action, actions)
-      return action, action_oh
-
-    
-    vectorized_sample_action = nnx.vmap(choice_wrapper, in_axes=(0, 0), out_axes=0)
-
-    @nnx.scan(in_axes = (nnx.Carry, 0), out_axes=(nnx.Carry, 0, 0))
-    def _sample_trajectory(carry: SampleTrajectoryCarry, key) -> tuple[SampleTrajectoryCarry, chex.Array]:
-      
-      state, p1_iset, p2_iset, public_state = self.game.get_info(carry.game_state)
-      obs = jnp.stack((p1_iset, p2_iset), axis=0)
-      action_key, chance_key = jax.random.split(key)
-
-      #For now we just use some very simple sampling policy
-      # TODO: Change this to some better policy
-      pi = get_reference_policy(carry.game_state, carry.legal_actions)
-      is_chance = self.game.is_chance(carry.game_state)
-      action_key = jax.random.split(action_key, self.game.num_players())
-      action, action_oh = vectorized_sample_action(action_key, pi)
-      timestep = TimeStep(
-        obs = obs,
-        legal = carry.legal_actions.astype(jnp.int8),
-        action = action_oh.astype(jnp.int8),
-        policy = pi,
-        reward = carry.reward,
-        valid = carry.valid,
-        terminal = carry.terminal
-      )
-      
-
-      def apply_action():
-        return self.game.apply_action(carry.game_state, action)
-      def sample_chance():
-        outcomes, probs = self.game.get_outcomes_and_probs(carry.game_state)
-        # Do not forget for deterministic games to put nonzero probs
-        # to sample something for shape consistency
-        probs = jnp.where(is_chance, probs, jnp.ones_like(probs)/ probs.shape[0])
-        chosen_outcome = jax.random.choice(chance_key, outcomes, p=probs)
-        outcome, terminal, reward, chosen_legals = self.game.apply_action(carry.game_state, chosen_outcome)
-        return outcome, terminal, reward, chosen_legals
-      next_game_state, next_terminal, next_rewards, next_legal = jax.lax.cond(is_chance, sample_chance, apply_action)
-      #Action in terminal state is not valid
-      next_terminal = jnp.logical_or(carry.terminal, next_terminal)
-      next_valid = jnp.logical_not(carry.terminal)   
-      new_carry = SampleTrajectoryCarry(
-        game_state = next_game_state,
-        legal_actions=jnp.where(next_terminal, self.example_timestep.legal, next_legal),
-        reward = next_rewards,
-        terminal = next_terminal,
-        valid = next_valid
-      )
-        
-      
-      timestep = jax.tree.map(lambda t, f: jnp.where(carry.valid, t, f).astype(t.dtype), timestep, self.example_timestep)
-      
-      return new_carry, timestep, is_chance
-    _, timestep, is_chance = _sample_trajectory(init_carry, trajectory_key)
-    #This is used to remove the chance nodes from the trajectory
-    non_chance = jnp.nonzero(~is_chance, size=self.non_chance_trajectory_max)[0]
-    filtered_timestep = jax.tree_util.tree_map(lambda x: jnp.take_along_axis(x, jnp.expand_dims(non_chance, axis=range(1, x.ndim)), axis=0).astype(x.dtype), timestep)
-    #[Trajectory, ...]
-    return filtered_timestep
   
   def update_world_model(self, optimizers: DreamerMAOptimizers, timestep: TimeStep, rng_key):
     """Compound loss for the entire world model."""
@@ -297,42 +199,49 @@ class DreamerMA():
   
   # Unlike flax.linen, nnx.jit allows updating the model itself.
   @partial(nnx.jit, static_argnums=(0))
-  def world_model_train(self, optimizers, rng_key):
-    trajectory_key, train_key = jax.random.split(rng_key)
-    timestep = self.sample_trajectories(self.config.batch_size, trajectory_key)
-    loss, pred_step = self.update_world_model(optimizers,timestep, train_key)
+  def world_model_train(self, optimizers, timestep: TimeStep, rng_key):
+    loss, pred_step = self.update_world_model(optimizers,timestep, rng_key)
     #Returns loss and the starting points in the trajectory.
-    # This is required for the joint training. Also return the 
-    # original timestep to allow training on real data
-    return loss, timestep, pred_step
+    # This is required for the joint training. 
+    return loss, pred_step
     
 
   def world_model_train_step(self):
     #_, p1_decoder_state = nnx.split(self.optimizers.p1_decoder_optimizer.model)
     #jax.debug.breakpoint()
     rng_key = self.generate_key()
+    timestep = self.buffer.sample_batch(self.config.batch_size)
     #return self.world_model_train(self.optimizers, rng_key)
-    loss, timestep, pred_step = self.cached_train(rng_key)
-    #loss, timestep, pred_step = self.world_model_train(self.optimizers, rng_key)
+    loss, pred_step = self.cached_train(timestep, rng_key)
+    #loss, pred_step = self.world_model_train(self.optimizers, timestep, rng_key)
     self.learner_steps += 1
     return loss, timestep, pred_step
 
-  def train_world_model(self, model_save_dir:str, num_steps:int, print_each: int = -1, save_each: int = -1):
-     
+  def train_world_model(self, model_save_dir:str, num_steps:int, replay_fraction:float, print_each: int = -1, save_each: int = -1):
+    #Start the training by sampling into the buffer,
+    # to ensure that there are distinct data for at least one step
+    self.buffer.add_batch(self.config.batch_size)
+    to_collect = 0 
     for i in range(num_steps):
-      rng_key = self.generate_key() 
-      loss, timestep, pred_step = self.cached_train(rng_key)
+      rng_key = self.generate_key()
+      timestep = self.buffer.sample_batch(self.config.batch_size) 
+      loss, pred_step = self.cached_train(timestep, rng_key)
       if print_each > 0 and i % print_each == 0:
         print(f"Step {i}, Loss: {loss}")
       if save_each > 0 and i % save_each == 0:
         model_file = model_save_dir + f"step_{i}.pkl"
         save_model(self, model_file)
+      to_collect += replay_fraction
+      if to_collect >= 1:
+        to_collect = int(to_collect)
+        self.buffer.add_batch(to_collect)
+        to_collect = 0
       self.learner_steps += 1
    
   def __getstate__(self):
     return {
       "config": self.config,
-      "game": self.game,
+      "buffer": self.buffer,
       "jax_rngs": self.jax_rngs,
       "optimizers": nnx.state(self.optimizers),
       "steps": self.learner_steps
@@ -346,7 +255,8 @@ class DreamerMA():
   
   def __setstate__(self, state):
     self.config = state["config"]
-    self.game = state["game"]
+    self.buffer = state["buffer"]
+    self.game = self.buffer.game
     
     self.init()
     

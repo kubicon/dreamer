@@ -5,6 +5,7 @@ import flax.nnx as nnx
 
 from rnad_dreamer_joint import RNaDDreamerJoint, RNaDConfig
 from dreamer_ma import DreamerMA, DreamerMAConfig
+from replay_buffer import ReplayBuffer
 from games.jax_game import JaxGame
 from train_utils import save_model, load_model
 
@@ -16,10 +17,13 @@ def _get_seed(seed:int):
   return seed
 
 def joint_train_loop(args, game:JaxGame):
-  dreamer_trajectory_seed = _get_seed(args.dreamer_trajectory_seed)
+  dreamer_model_seed = _get_seed(args.dreamer_model_seed)
   rnad_trajectory_seed = _get_seed(args.rnad_trajectory_seed)
-  dreamer_network_seed = _get_seed(args.dreamer_network_seed)
+  dreamer_network_seed = _get_seed(args.dreamer_model_seed)
   rnad_network_seed = _get_seed(args.rnad_network_seed)
+  
+  trajectory_seed = _get_seed(args.replay_trajectory_seed)
+  buffer_sample_seed = _get_seed(args.replay_sample_seed)
 
   saved_model_file = args.saved_model_file
   if saved_model_file and not saved_model_file.startswith("/"):
@@ -31,15 +35,18 @@ def joint_train_loop(args, game:JaxGame):
     # except FileNotFoundError:
     #   assert False, f"Given file {saved_model_file} does not exist!"
     assert isinstance(rnad_model, RNaDDreamerJoint), f"The loaded model should be an instance of RnaDDreamerJoint, not {rnad_model.__class__}"
-    dreamer_trajectory_seed = rnad_model.world_model.config.seed
+    dreamer_model_seed = rnad_model.world_model.config.seed
     dreamer_network_seed = rnad_model.world_model.config.rng_seed
     rnad_trajectory_seed = rnad_model.config.seed
     rnad_network_seed = rnad_model.config.network_seed
+    trajectory_seed = rnad_model.world_model.buffer.jax_seed
+    buffer_sample_seed = rnad_model.world_model.buffer.np_seed
+    replay_buffer = rnad_model.world_model.buffer
   else:
     print("Creating clean model")
     dreamer_config = DreamerMAConfig(
         batch_size=args.dreamer_batch_size,
-        seed=dreamer_trajectory_seed,
+        seed=dreamer_model_seed,
 
 
         #Weights of the individual loss terms of the world model
@@ -100,7 +107,8 @@ def joint_train_loop(args, game:JaxGame):
         learning_rate = args.rnad_learning_rate,
         network_seed = rnad_network_seed
     )
-    dreamer_world_model = DreamerMA(dreamer_config, game)
+    replay_buffer = ReplayBuffer(game, trajectory_seed, buffer_sample_seed, args.replay_size)
+    dreamer_world_model = DreamerMA(dreamer_config, replay_buffer)
     rnad_model = RNaDDreamerJoint(dreamer_world_model, rnad_config) 
   model_save_dir = args.model_save_dir
   game_name = game.game_name()
@@ -109,17 +117,22 @@ def joint_train_loop(args, game:JaxGame):
   params_str = f'{empty.join(f"_{value}" for key, value in game_params.items())}'
   if not model_save_dir:
       
-      model_save_dir = f"/trained_networks/compound/{game_name}{params_str}/seeds{dreamer_trajectory_seed}_{rnad_trajectory_seed}/network_seeds_{dreamer_network_seed}_{rnad_network_seed}/"
+      model_save_dir = f"/trained_networks/compound/{game_name}{params_str}/seeds{dreamer_model_seed}_{rnad_trajectory_seed}/network_seeds_{dreamer_network_seed}_{rnad_network_seed}/"
       model_save_dir = os.getcwd() + model_save_dir
 
   dreamer_loss, rnad_img_loss, rnad_real_loss = 0, 0, 0
   start_step = rnad_model.learner_steps
-  _, p1_rnad_decoder_state = nnx.split(rnad_model.optimizers.p1_decoder_optimizer)
-  _, p1_dreamer_decoder_state = nnx.split(rnad_model.world_model.optimizers.p1_decoder_optimizer)
-  diff_tree = jax.tree.map(lambda x, y: np.sum((x - y) ** 2), p1_rnad_decoder_state, p1_dreamer_decoder_state)
+  # _, p1_rnad_decoder_state = nnx.split(rnad_model.optimizers.p1_decoder_optimizer)
+  # _, p1_dreamer_decoder_state = nnx.split(rnad_model.world_model.optimizers.p1_decoder_optimizer)
+  # diff_tree = jax.tree.map(lambda x, y: np.sum((x - y) ** 2), p1_rnad_decoder_state, p1_dreamer_decoder_state)
   #print(f"RNaD init decoder state {p1_rnad_decoder_state}")
   #print(f"Dreamer init decoder state {p1_dreamer_decoder_state}")
   #jax.debug.breakpoint()
+
+  #Start the training by sampling into the buffer,
+  # to ensure that there are distinct data for at least one step
+  replay_buffer.add_batch(dreamer_world_model.config.batch_size)
+  to_collect = 0
   for s in range(args.num_steps):
     step = start_step + s
     if args.print_each > 0 and s % args.print_each == 0:
@@ -137,3 +150,8 @@ def joint_train_loop(args, game:JaxGame):
     #jax.tree_util.tree_map(lambda x: print(x.dtype), dreamer_timestep)
     for rs in range(args.rnad_steps_each_step):
       rnad_img_loss, rnad_real_loss = rnad_model.step(dreamer_timestep, dreamer_prediction_step)
+    to_collect += args.replay_fraction
+    if to_collect >= 1:
+      to_collect = int(to_collect)
+      replay_buffer.add_batch(to_collect)
+      to_collect = 0
