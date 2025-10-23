@@ -57,11 +57,12 @@ def get_bin_log_prob(dist_logits: jax.Array, bins: jax.Array,  value: jax.Array,
   """Get log prob of the discrete distribution corresponding to the exponentially spaced bins.
   From https://arxiv.org/pdf/2301.04104  page 7. First two hot encodes value, and the 
   final log prob is twohot(value) * logsoftmax(dist_logits). 
-  Expects dist_logits to be of shape [Trajectory, batch, 2*bin_range + 1],
-  value to be of shape [Trajectory, batch, 1] and
+  Expects dist_logits to be of shape [Trajectory, batch, ..., 2*bin_range + 1],
+  value to be of shape [Trajectory, batch, ..., 1] or [Trajectory, batch, ....] and
   bins of shape [2 * bin_range + 1]"""
+  value = value.reshape(value.shape + (1, ) * (dist_logits.ndim - value.ndim))
   chex.assert_equal_shape_suffix([dist_logits, bins], 1) # The last dimension of bins and dist_logits should match 
-  chex.assert_equal_shape_prefix([dist_logits, value], 2) # All dimension except the last should match
+  chex.assert_equal_shape_prefix([dist_logits, value], -1) # All dimension except the last should match
   #[Trajectory, Batch, 2 * bin_range + 1]
   val_two_hot = two_hot_encode(bins, value, use_symlog=use_symlog)
   return val_two_hot * jax.nn.log_softmax(dist_logits)
@@ -71,11 +72,11 @@ def two_hot_encode(bins: jax.Array, value:jax.Array, use_symlog= True) -> jax.Ar
   """Perform the two hot encoding of value (by default transformed by symlog)
   in the range of bins. There will be two nonzero values of the two closest bins, 
   with values proportional to the bin closeness."""
-  value = jnp.where(use_symlog, symlog(value), value)[..., None]
-  promoted_bins = bins[None, None, ...]
+  value = jnp.where(use_symlog, symlog(value), value)
+  promoted_bins = bins.reshape((1, ) * (value.ndim - 1) + bins.shape)
   below = value >= promoted_bins
   above = value <= promoted_bins
-  #Making use of argmax/argmin returning the first occurence
+  #Making use of argmax/argmin returning the first occurence as a tie breaking strategy
   int_start_idx = jnp.where(jnp.sum(below, axis=-1) == bins.shape[0] - 1, bins.shape[0] - 1, jnp.maximum(jnp.argmin(below, axis=-1).astype(jnp.int32) - 1, 0))
   int_end_idx = jnp.argmax(above, axis= -1).astype(jnp.int32)
 

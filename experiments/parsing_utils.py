@@ -8,13 +8,14 @@ def add_dreamer_arguments(parser: ArgumentParser, multi_agent: bool = True,
   initialize for. If joint_train is set to True,
   it ensures that the parameter names that are shared among Dreamer and
   RNaD (such as batch size) get dreamer_ prepended to differentiate them."""
+  
+  diff_string = "dreamer_" if joint_train else ""
   ##Model parameters 
   parser.add_argument("--encoded_categories", type=int, default=32, help="Number of options for each categorical distribution in the latent state.")
   parser.add_argument("--encoded_classes", type=int, default=32, help="Number of categorical distributions in the latent state")
   parser.add_argument("--hidden_state_size", type=int, default =256, help="Size of the RNN hidden state")
-  parser.add_argument("--bin_range", type=int, default=20, help="Number of the exponentially spaced bins for certain predictions such as reward in one direction, bins will be spaced out as symexp([-bin_range, ..., bin_range])")
+  parser.add_argument(f"--{diff_string}bin_range", type=int, default=20, help="Number of the exponentially spaced bins for certain predictions such as reward in one direction, bins will be spaced out as symexp([-bin_range, ..., bin_range])")
 
-  diff_string = "dreamer_" if joint_train else ""
   parser.add_argument(f"--{diff_string}batch_size", type=int, default=32, help="Batch size for training")
   parser.add_argument(f"--{diff_string}learning_rate", type=float, default=3e-4, help="Learning rate for the optimizer")
   parser.add_argument(f"--{diff_string}network_seed", type=int, default=-1, help="Random seed for network initialization")
@@ -52,12 +53,15 @@ def add_rnad_arguments(parser: ArgumentParser, joint_train: bool =False) ->Argum
   If joint_train is specified, certain parameters, such as batch_size, 
   that share name with Dreamer, have rnad_ prepended to differentiate between them.
   Also, for joint_train some training loop arguments like dreamer_path are not specified."""
+  
+  diff_string = "rnad_" if joint_train else ""
   ##RNaD parameters  
   parser.add_argument("--target_network_update", type=float, default=1e-3, help="Update rate for target network")
   parser.add_argument("--eta", type=float, default=0.2, help="Strenght of the regularization in RNaD. Used for the reward transformation and the KL regularization for V-trace.")
   parser.add_argument("--vtrace_eta", type=float, default=0.2, help="Strenght of the additional KL regularization term in V-trace.")
   parser.add_argument("--sampling_epsilon", type=float, default=0.0, help="Defines mix of uniform policy to the network learned policy during trajectory sampling.")
   parser.add_argument("--use_learned_model", type=bool, default=True, help="Whether to use the Dreamer learned model for trajectory sampling. If not, trajectories are sampled from the game. Just for debugging.")
+  parser.add_argument(f"--{diff_string}bin_range", type=int, default=20, help="Number of the exponentially spaced bins for the value categorical distribution prediction")
 
   #Dreamer model extraction parameters
   parser.add_argument("--state_sample_threshold", type=float, default=0.05, help="Threshold for the stochastic state sampling. If the probability of a class is below this threshold, it is not sampled.")
@@ -68,7 +72,6 @@ def add_rnad_arguments(parser: ArgumentParser, joint_train: bool =False) ->Argum
   parser.add_argument("--beta_imagination", type=float, default=1.0, help="Coefficient for the loss on Dreamer imagined trajectories.")
   parser.add_argument("--beta_real", type=float, default=0.3, help="Coefficient for the loss on trajectories sampled from the real environment.")
 
-  diff_string = "rnad_" if joint_train else ""
   parser.add_argument(f"--{diff_string}batch_size", type=int, default=32, help="Batch size for training")
   parser.add_argument(f"--{diff_string}learning_rate", type=float, default=3e-4, help="Learning rate for the optimizer")
   parser.add_argument(f"--{diff_string}network_seed", type=int, default=-1, help="Random seed for network initialization")
@@ -90,9 +93,8 @@ def add_rnad_arguments(parser: ArgumentParser, joint_train: bool =False) ->Argum
   parser.add_argument("--neurd_threshold", type=float, default=2, help="Threshold parameter for NeuRD")
 
   ##Network layer parameters
-  parser.add_argument("--network_hidden_size", type=int, default=256, help="Size of the hidden layer in the RNaD network")
-  parser.add_argument("--network_hidden_layers", type=int, default=1, help="Number of stacked hidden layers in the RNaD network")
-
+  parser.add_argument("--network_hidden_size", type=int, default=256, help="Size of the hidden layer in the RNaD actor network")
+  parser.add_argument("--network_hidden_layers", type=int, default=1, help="Number of stacked hidden layers in the RNaD actor network")
   if not joint_train:
     #Complete path to restore the whole model
     ## World model path

@@ -23,6 +23,7 @@ def train_rnad(args):
         batch_size=args.batch_size,
         seed=args.trajectory_seed,
         use_learned_model = args.use_learned_model,
+        bin_range = args.bin_range,
 
         beta_imagination = args.beta_imagination,
         beta_real = args.beta_real,

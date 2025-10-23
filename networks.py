@@ -10,6 +10,18 @@ from games.jax_game import JaxGame
 from train_utils import legal_policy, legal_log_policy
 
 
+# #Implementing the summation order suggestion
+#     # from https://arxiv.org/pdf/2301.04104 page 18
+#     bins = jnp.arange((2 * self.config.bin_range) + 1) - self.config.bin_range
+#     v_probs = nnx.softmax(v_dist_logits)
+#     pos_bins = bins * (bins >= 0)
+#     # flip the probs and bins for the negative
+#     # to ensure summation from small to large in magnitude 
+#     neg_bins = bins * (bins < 0)
+#     v_pos_part = jnp.sum(v_probs * pos_bins)
+#     v_neg_part = jnp.sum(jnp.flip(v_probs * neg_bins))
+#     v = v_pos_part + v_neg_part
+#     v = symexp(v)
 
 class LinNormRelu(nnx.Module):
   def __init__(self, in_features, out_features,rngs: nnx.Rngs):
@@ -52,29 +64,67 @@ class HiddenMLP(nnx.Module):
 class RNaDNetwork(nnx.Module):
   """The RNaD algorithm network, with policy and value heads.
   Receive current iset and legal actions mask and return
-  policy, value, legal log policy and policy logit.
-  Only the iset is sent to the network."""
-  hidden_size: int
-  out_dims: int
+  policy, value, log policy and policy logit.
+  Only the iset is sent to the network.
+  The value is parametrized as logits for a categorical distribution
+  over the exponentially spaced bins like symexp([-bin_range, bin_range])"""
 
-  def __init__(self, iset_features, action_features, hidden_features, num_layers, rngs:nnx.Rngs):
+  def __init__(self, iset_features, action_features, bin_range, hidden_features, num_layers, rngs:nnx.Rngs):
     self.init_layer = LinNormRelu(iset_features, hidden_features, rngs)
     self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
     self.policy_head = nnx.Linear(hidden_features, action_features, rngs=rngs)
-    self.value_head = nnx.Linear(hidden_features, 1, rngs=rngs)
+    #Initialize the value output layer to all zeros, as per
+    # https://arxiv.org/pdf/2301.04104 page 6
+    self.value_head = nnx.Linear(hidden_features, (2 * bin_range) + 1, rngs=rngs, kernel_init=nnx.initializers.zeros_init(), bias_init=nnx.initializers.zeros_init())
   
   def __call__(self, iset, legal):
     x = self.init_layer(iset)
     x = self.core_mlp(x)
     logit = self.policy_head(x)
-    v = self.value_head(x)
+    v_dist_logits = self.value_head(x)
     
     pi = legal_policy(logit, legal)
     log_pi = legal_log_policy(logit, legal)
     
-    return pi, v, log_pi, logit
+    return pi, v_dist_logits, log_pi, logit
   
-
+# class RNaDActorNetwork(nnx.Module):
+#   """The RNaD algorithm actor network.
+#   Receive current iset and legal actions mask and return
+#   policy, log policy and policy logit.
+#   The policy and log policy are masked with legal."""
+#   def __init__(self, iset_features, action_features, hidden_features, num_layers, rngs:nnx.Rngs):
+#     self.init_layer = LinNormRelu(iset_features, hidden_features, rngs)
+#     self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
+#     self.policy_head = nnx.Linear(hidden_features, action_features, rngs=rngs)
+  
+#   def __call__(self, iset, legal):
+#     x = self.init_layer(iset)
+#     x = self.core_mlp(x)
+#     logit = self.policy_head(x)
+    
+#     pi = legal_policy(logit, legal)
+#     log_pi = legal_log_policy(logit, legal)
+    
+#     return pi, log_pi, logit
+  
+# class RNaDCriticNetwork(nnx.Module):
+#   """The RNaD algorithm actor network.
+#   Receive current iset and return
+#   the logits of categorical distribution of value of the 
+#   current infoset, that is defined over the 
+#   exponentially spaced bins like symexp([-bin_range, bin_range])."""
+#   def __init__(self, iset_features, bin_range, hidden_features, num_layers, rngs:nnx.Rngs):
+#     self.init_layer = LinNormRelu(iset_features, hidden_features, rngs)
+#     self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
+#     self.value_head = nnx.Linear(hidden_features, (2 * bin_range + 1), rngs=rngs)
+  
+#   def __call__(self, iset):
+#     x = self.init_layer(iset)
+#     x = self.core_mlp(x)
+#     v_dist_logit = self.value_head(x)
+    
+#     return v_dist_logit
 
 class SequenceModel(nnx.Module):
   '''
@@ -82,18 +132,12 @@ class SequenceModel(nnx.Module):
   '''
   def __init__(self, encoded_classes, encoded_categories, action_features, num_players, hidden_state_size, rngs: nnx.Rngs):
     self.gru_cell = nnx.GRUCell(encoded_classes * encoded_categories + (action_features * num_players), hidden_state_size, gate_fn=nnx.silu, rngs=rngs) 
-    #TODO: I think we actually do not want to use RNN here
-    # as it should just wrap the GRU cells into a sequence, 
-    # but as we require also to predict the deterministic state in the current sequence
-    # to get the next one, I think we want to process the sequence manually with scan
-    #self.rnn = nnx.RNN(self.gru_cell, return_carry=True, time_major=True, rngs=rngs)
     
   def __call__(self, hidden_state: chex.Array, gru_input: chex.Array):
     """gru_input is concatend deterministic state and action"""
     # TODO: Shall we first pass through MLP before the RNN?
     new_hidden_state, _ = self.gru_cell(hidden_state, gru_input)
     return new_hidden_state
-    #return self.rnn(hidden_state,gru_input) 
   
 
 class Encoder(nnx.Module):
@@ -193,8 +237,9 @@ class Predictor(nnx.Module):
   def __init__(self, hidden_state_size, encoded_classes, encoded_categories, bin_range, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
     self.init_layer = LinNormRelu(hidden_state_size + encoded_classes * encoded_categories, hidden_features, rngs)
     self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
-    self.reward_layer = nnx.Linear(hidden_features, (2 * bin_range) + 1, rngs=rngs)
-    #self.reward_layer = nnx.Linear(hidden_features, 1, rngs=rngs)
+    #Initialize the reward output layer to all zeros, as per
+    # https://arxiv.org/pdf/2301.04104 page 6
+    self.reward_layer = nnx.Linear(hidden_features, (2 * bin_range) + 1, rngs=rngs, kernel_init= nnx.initializers.zeros_init(), bias_init=nnx.initializers.zeros_init())
     self.done_layer = nnx.Linear(hidden_features, 1, rngs=rngs)
     
   def __call__(self, hidden_state: chex.Array, encoded_state: chex.Array):
@@ -222,6 +267,39 @@ class LegalActionsNetwork(nnx.Module):
     legal = self.legal_layer(x)
     return jnp.reshape(legal, (*legal.shape[:-1], self.num_players, self.action_dimension))
 
+# class RewardPredictor(nnx.Module):
+#   """Receive a current hidden state and deterministic state and 
+#   return the logits of a the reward categorical
+#   distribution over exponentially spaced bins such as
+#   symexp([-bin_range, bin_range])"""
+#   def __init__(self, bin_range, encoded_classes, encoded_categories, hidden_state_size, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
+#     self.init_layer = LinNormRelu(hidden_state_size + (encoded_classes * encoded_categories), hidden_features, rngs)
+#     self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
+#     self.reward_layer = nnx.Linear(hidden_features, (2 * bin_range) + 1, rngs=rngs)
+
+
+#   def __call__(self, hidden_state: chex.Array, encoded_state: chex.Array):
+#     x = jnp.concatenate([hidden_state, encoded_state.reshape(*encoded_state.shape[:-2], -1)], axis=-1)
+#     x = self.init_layer(x)
+#     x = self.core_mlp(x)
+#     reward_dist_logits = self.reward_layer(x)
+#     return reward_dist_logits
+  
+# class DonePredictor(nnx.Module):
+#   """Receive a current hidden state and deterministic state and
+#   return the logits of the done/terminal flag"""
+#   def __init__(self,encoded_classes, encoded_categories, hidden_state_size, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
+#     self.init_layer = LinNormRelu(hidden_state_size + (encoded_classes * encoded_categories), hidden_features, rngs)
+#     self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
+#     self.done_layer = nnx.Linear(hidden_features, 1, rngs=rngs)
+
+
+#   def __call__(self, hidden_state: chex.Array, encoded_state: chex.Array):
+#     x = jnp.concatenate([hidden_state, encoded_state.reshape(*encoded_state.shape[:-2], -1)], axis=-1)
+#     x = self.init_layer(x)
+#     x = self.core_mlp(x)
+#     done_logit = self.done_layer(x)
+#     return done_logit
 
 # class PredictorWithLegal(nnx.Module):
 #   """Has reward and done heads the same way as standard predictor,
@@ -480,11 +558,11 @@ def initialize_dreamer_optimizers(config: DreamerConfig, game: JaxGame, rngs: nn
 
 def initialize_rnad_optimizers(config: RNaDConfig, iset_size: int, actions: int, rngs: nnx.Rngs) ->RNaDOptimizers:
   """Initializes optimizers for the main algorithm network and the target network for the RNaD algorithm."""
-  rnad_network = RNaDNetwork(iset_size, actions, config.rnad_network_details[0], config.rnad_network_details[1], rngs=rngs)
-  target_network = RNaDNetwork(iset_size, actions, config.rnad_network_details[0], config.rnad_network_details[1], rngs=rngs)
+  rnad_network = RNaDNetwork(iset_size, actions, config.bin_range, config.rnad_network_details[0], config.rnad_network_details[1], rngs=rngs)
+  target_network = RNaDNetwork(iset_size, actions, config.bin_range, config.rnad_network_details[0], config.rnad_network_details[1], rngs=rngs)
   optimizer = nnx.Optimizer(model=rnad_network, tx= optax.chain(optax.adam(config.learning_rate, b1=0.0), optax.clip(100)))
   optimizer_target = nnx.Optimizer(model=target_network, tx=optax.sgd(config.target_network_update))
-  rnad_optimizers = RNaDOptimizers(rnad_optimizer=optimizer,
+  rnad_optimizers = RNaDOptimizers(rnad_optimizer = optimizer,
                                     rnad_target_optimizer = optimizer_target)
   return rnad_optimizers
 

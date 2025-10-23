@@ -57,7 +57,7 @@ def joint_train_loop(args, game:JaxGame):
         hidden_state_size = args.hidden_state_size,
         encoded_classes = args.encoded_classes,
         encoded_categories = args.encoded_categories,
-        bin_range = args.bin_range,
+        bin_range = args.dreamer_bin_range,
 
         # Ordered as (hidden_layer_features, num_hidden_layers)
         encoder_network_details = (args.encoder_hidden_size, args.encoder_hidden_layers),
@@ -74,6 +74,7 @@ def joint_train_loop(args, game:JaxGame):
         batch_size=args.rnad_batch_size,
         seed=rnad_trajectory_seed,
         use_learned_model = True,
+        bin_range = args.rnad_bin_range,
 
         beta_imagination = args.beta_imagination,
         beta_real = args.beta_real,

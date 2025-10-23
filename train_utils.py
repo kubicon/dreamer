@@ -142,7 +142,8 @@ class RNaDConfig:
                                         # of this threshold and the lowest of max probability outcomes of the categoricals). 
   terminal_threshold:float =  0.5 #Thresholds when to consider the state terminal, or the actions
   legal_threshold: float = 0.5    # Legal, when we take the sigmoid over the Dreamer produced logits.
-  
+  bin_range: int = 20 #Number of the exponentially spaced bins for the value categorical distribution prediction
+
   learning_rate: float = 3e-4
   target_network_update: float = 1e-3
 

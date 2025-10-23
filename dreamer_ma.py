@@ -211,7 +211,6 @@ class DreamerMA():
     #jax.debug.breakpoint()
     rng_key = self.generate_key()
     timestep = self.buffer.sample_batch(self.config.batch_size)
-    #return self.world_model_train(self.optimizers, rng_key)
     loss, pred_step = self.cached_train(timestep, rng_key)
     #loss, pred_step = self.world_model_train(self.optimizers, timestep, rng_key)
     self.learner_steps += 1

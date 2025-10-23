@@ -13,10 +13,11 @@ import os
 from functools import partial
 
 from dreamer_ma import DreamerMA
-from networks import initialize_joint_optimizers, JointOptimizers, DreamerMAOptimizers, RNaDNetwork, IsetDecoder, Predictor, LegalActionsNetwork, DynamicsPredictor, SequenceModel, JointIsetEncoder
-from train_utils import RNaDConfig, RNaDTimeStep, TimeStep, PredictionStepWithLegal, load_model, save_model
+from networks import *
+from train_utils import RNaDConfig, RNaDTimeStep, TimeStep, PredictionStepWithLegal, load_model, symexp, get_loss_mean_with_mask
 from rnad_dreamer import EntropySchedule, neurd_loss, v_trace
-from distributions import sample_categorical
+from distributions import sample_categorical, get_bin_log_prob
+
 
 
 
@@ -55,8 +56,8 @@ class RNaDDreamerJoint():
         sizes=self.config.entropy_schedule_size,
         repeats=self.config.entropy_schedule_repeats)
     
-    self.prev_network = RNaDNetwork(self.iset_size, self.actions, self.config.rnad_network_details[0], self.config.rnad_network_details[1], rngs=self.nnx_rngs)
-    self._prev_network = RNaDNetwork(self.iset_size, self.actions, self.config.rnad_network_details[0], self.config.rnad_network_details[1], rngs=self.nnx_rngs)
+    self.prev_network = RNaDNetwork(self.iset_size, self.actions, self.config.bin_range, self.config.rnad_network_details[0], self.config.rnad_network_details[1], rngs=self.nnx_rngs)
+    self._prev_network = RNaDNetwork(self.iset_size, self.actions, self.config.bin_range, self.config.rnad_network_details[0], self.config.rnad_network_details[1], rngs=self.nnx_rngs)
     
     self.optimizers = initialize_joint_optimizers(self.world_model.optimizers, self.config, self.iset_size, self.actions, self.nnx_rngs)
     self.cached_step = nnx.cached_partial(self._jit_step_with_model, self.optimizers, self.prev_network, self._prev_network)
@@ -85,17 +86,40 @@ class RNaDDreamerJoint():
     
 
   @partial(nnx.jit, static_argnums=(0,))
-  def _jit_get_network(self, network: RNaDNetwork, obs, legal) -> chex.Array:
-    return network(obs, legal)
+  def _jit_get_network(self, network: RNaDNetwork, obs, legal):
+    pi, v_dist_logits, log_pi, logits = network(obs, legal)
+    return pi, v_dist_logits, log_pi, logits
   
   @partial(nnx.jit, static_argnums=(0,))
-  @nnx.vmap(in_axes=(None, None, 1, 1), out_axes=(1))
-  def _jit_get_batch_network(self, network: RNaDNetwork, obs, legal) -> chex.Array:
-    return network(obs, legal)
+  def get_v_from_dist(self, v_dist_logits):
+    """Reads out the v prediction from the predicted
+    logits of the categorical distribution, by multiplying it with the bins."""
+    #Implementing the summation order suggestion
+    # from https://arxiv.org/pdf/2301.04104 page 18
+    bins = jnp.arange((2 * self.config.bin_range) + 1) - self.config.bin_range
+    bins = bins.reshape((1,) * (v_dist_logits.ndim - 1) + bins.shape)
+    v_probs = nnx.softmax(v_dist_logits)
+    pos_bins = bins * (bins >= 0)
+    # flip the probs and bins for the negative
+    # to ensure summation from small to large in magnitude 
+    neg_bins = bins * (bins < 0)
+    v_pos_part = jnp.sum(v_probs * pos_bins, axis=-1, keepdims=True)
+    v_neg_part = jnp.sum(jnp.flip(v_probs * neg_bins), axis=-1, keepdims=True)
+    v = v_pos_part + v_neg_part
+    v = symexp(v)
+    return v
+  
+  @partial(nnx.jit, static_argnums=(0,))
+  def _jit_get_actor_critic(self, network: RNaDNetwork, obs, legal):
+    """Same as get network, but also reads out the v value
+    from the categorical distribution"""
+    pi, v_dist_logits, log_pi, logits = self._jit_get_network(network, obs, legal)
+    v = self.get_v_from_dist(v_dist_logits)
+    return pi, v, log_pi, logits
   
   @partial(nnx.jit, static_argnums=(0,))
   def _jit_get_policy(self, network: RNaDNetwork, obs, legal) -> chex.Array:
-    return self._jit_get_network(network, obs, legal)[0]
+    return network(obs, legal)[0]
   
   # TODO: Be careful, this sometimes produces an action that is illegal
   @partial(nnx.jit, static_argnums=(0,))
@@ -268,17 +292,18 @@ class RNaDDreamerJoint():
       alpha: float,
     ):
       
+      bins = jnp.arange((2 * self.config.bin_range) + 1) - self.config.bin_range
       # Per player vmap
       per_player_net_apply = nnx.vmap(self._jit_get_network, in_axes=(None, 0, 0), out_axes=(0))
       #Per trajectory and batch dimensions
       vectorized_net_apply = nnx.vmap(nnx.vmap(per_player_net_apply, in_axes=(None, 0, 0), out_axes=(0)), in_axes=(None, 0, 0), out_axes=(0))
-      pi, v, log_pi, logit = vectorized_net_apply(rnad_network, timestep.obs, timestep.legal)
-      
-      _, v_target, _, _ = vectorized_net_apply(target_network, timestep.obs, timestep.legal)
+      pi, v_dist_logits, log_pi, logit = vectorized_net_apply(rnad_network, timestep.obs, timestep.legal)
+
+      _, v_target_dist_logits, _, _ = vectorized_net_apply(target_network, timestep.obs, timestep.legal)
       _, _, log_pi_prev, _ = vectorized_net_apply(prev_network, timestep.obs, timestep.legal)
       _, _, log_pi_prev_, _ = vectorized_net_apply(_prev_network, timestep.obs, timestep.legal)
        
-
+      v_target = self.get_v_from_dist(v_target_dist_logits)
       # This creates the regularization term for rewards
       regularized_term = log_pi - (alpha * log_pi_prev + (1 - alpha) * log_pi_prev_) 
       
@@ -289,9 +314,11 @@ class RNaDDreamerJoint():
                                         self.config.eta, self.config.vtrace_eta, self.config.gamma_vtrace)
       #v_train_target, q_value = jnp.zeros_like(v), jnp.zeros_like(pi)
       # We multiply by 2, since each player acts
-      normalization = jnp.sum(timestep.valid) * 2 
-      v_loss = jnp.sum((expanded_valid * (v - lax.stop_gradient(v_train_target)) ** 2)) / (normalization + (normalization == 0))
-      
+      normalization = jnp.sum(timestep.valid) * 2
+      #v_loss = jnp.sum((expanded_valid * (v - lax.stop_gradient(v_train_target)) ** 2)) / (normalization + (normalization == 0))
+      v_loss = -get_bin_log_prob(v_dist_logits, bins, jax.lax.stop_gradient(v_train_target))
+      v_loss_value = jnp.sum(v_loss * expanded_valid) / (normalization + (normalization == 0))
+
       # Each Q is multiplied by product of importance_sampling of opponent and inverted sampling policy by the acting player.
       # This computes counterfactual importance sampling
       sampling_policy = jnp.sum(timestep.policy * timestep.action, axis=-1, keepdims=True) * expanded_valid + (1 - expanded_valid)
@@ -312,8 +339,7 @@ class RNaDDreamerJoint():
       # The multiplication by -1 is critical here, otherwise we would
       # be minimizing the neurd term, but we want to maximize it.
       neurd_loss_value = -jnp.sum(loss_neurd * expanded_valid) / (normalization + (normalization == 0))
-      return v_loss + neurd_loss_value
-      #return neurd_loss_value
+      return v_loss_value + neurd_loss_value
 
     def imagination_loss(rnad_network: RNaDNetwork,
       sequence_model: SequenceModel, 

@@ -16,11 +16,9 @@ from functools import partial
 
 from dreamer_ma import DreamerMA, DreamerMAOptimizers
 from networks import initialize_rnad_optimizers, RNaDOptimizers, RNaDNetwork, IsetDecoder, Predictor, LegalActionsNetwork, DynamicsPredictor, SequenceModel, JointIsetEncoder
-from train_utils import RNaDConfig, RNaDTimeStep, load_model, save_model
-from distributions import sample_categorical
+from train_utils import RNaDConfig, RNaDTimeStep, load_model, save_model, symexp
+from distributions import sample_categorical, get_bin_log_prob
 from games.jax_game import GameState
-
-#jax.config.update("jax_debug_nans", True)
 
   
 
@@ -347,8 +345,36 @@ class RNaDDreamer():
     
 
   @partial(nnx.jit, static_argnums=(0,))
-  def _jit_get_network(self, network: RNaDNetwork, obs, legal) -> chex.Array:
-    return network(obs, legal)
+  def _jit_get_network(self, network: RNaDNetwork, obs, legal):
+    pi, v_dist_logits, log_pi, logits = network(obs, legal)
+    return pi, v_dist_logits, log_pi, logits
+  
+  @partial(nnx.jit, static_argnums=(0,))
+  def get_v_from_dist(self, v_dist_logits):
+    """Reads out the v prediction from the predicted
+    logits of the categorical distribution, by multiplying it with the bins."""
+    #Implementing the summation order suggestion
+    # from https://arxiv.org/pdf/2301.04104 page 18
+    bins = jnp.arange((2 * self.config.bin_range) + 1) - self.config.bin_range
+    bins = bins.reshape((1,) * (v_dist_logits.ndim - 1) + bins.shape)
+    v_probs = nnx.softmax(v_dist_logits)
+    pos_bins = bins * (bins >= 0)
+    # flip the probs and bins for the negative
+    # to ensure summation from small to large in magnitude 
+    neg_bins = bins * (bins < 0)
+    v_pos_part = jnp.sum(v_probs * pos_bins, axis=-1, keepdims=True)
+    v_neg_part = jnp.sum(jnp.flip(v_probs * neg_bins), axis=-1, keepdims=True)
+    v = v_pos_part + v_neg_part
+    v = symexp(v)
+    return v
+  
+  @partial(nnx.jit, static_argnums=(0,))
+  def _jit_get_actor_critic(self, network: RNaDNetwork, obs, legal):
+    """Same as get network, but also reads out the v value
+    from the categorical distribution"""
+    pi, v_dist_logits, log_pi, logits = self._jit_get_network(network, obs, legal)
+    v = self.get_v_from_dist(v_dist_logits)
+    return pi, v, log_pi, logits
   
   @partial(nnx.jit, static_argnums=(0,))
   @nnx.vmap(in_axes=(None, None, 1, 1), out_axes=(1))
@@ -380,23 +406,6 @@ class RNaDDreamer():
   @nnx.vmap(in_axes=(None, None, 1, 1, 1), out_axes=1)
   def _jit_get_batch_policy(self, network: RNaDNetwork, key, obs, legal) -> chex.Array:
     return self._jit_get_policy_and_action(network, key, obs, legal)
-  
-  # Expects obs and legal to be in shape [Batch, Player, ...]
-  # @partial(nnx.jit, static_argnums=(0))
-  # def batch_policy_and_action(self, network: RNaDNetwork, obs, legal):
-    
-  #   keys = self.get_next_rng_keys_dimensional(obs.shape[:2])
-  #   keys = np.array(keys)
-  #   pi, action, action_oh = self._jit_get_batch_policy(network, keys, obs, legal)
-  #   pi = np.array(pi, dtype=np.float64)
-  #   pi = pi / np.sum(pi, axis=-1, keepdims=True) # TODO: Remove this
-  #   action = np.array(action, dtype=np.int32)
-  #   action_oh = np.array(action_oh, dtype=np.float64)
-  #   return pi, action, action_oh
-  
-  # def get_policy(self, network: RNaDNetwork, obs, legal, player: int):
-  #   pi = self._jit_get_policy(network, obs, legal)
-  #   return pi[player]
   
   @partial(nnx.jit, static_argnums=0)
   def get_policy_both(self, network: RNaDNetwork, joint_obs, joint_legal):
@@ -665,18 +674,18 @@ class RNaDDreamer():
       timestep: RNaDTimeStep,
       alpha: float,
     ):
-      
+      bins = jnp.arange((2 * self.config.bin_range) + 1) - self.config.bin_range
       # Per player vmap
       per_player_net_apply = nnx.vmap(self._jit_get_network, in_axes=(None, 0, 0), out_axes=(0))
       #Per trajectory and batch dimensions
       vectorized_net_apply = nnx.vmap(nnx.vmap(per_player_net_apply, in_axes=(None, 0, 0), out_axes=(0)), in_axes=(None, 0, 0), out_axes=(0))
-      pi, v, log_pi, logit = vectorized_net_apply(rnad_network, timestep.obs, timestep.legal)
-      
-      _, v_target, _, _ = vectorized_net_apply(target_network, timestep.obs, timestep.legal)
+      pi, v_dist_logits, log_pi, logit = vectorized_net_apply(rnad_network, timestep.obs, timestep.legal)
+
+      _, v_target_dist_logits, _, _ = vectorized_net_apply(target_network, timestep.obs, timestep.legal)
       _, _, log_pi_prev, _ = vectorized_net_apply(prev_network, timestep.obs, timestep.legal)
       _, _, log_pi_prev_, _ = vectorized_net_apply(_prev_network, timestep.obs, timestep.legal)
-      
-
+       
+      v_target = self.get_v_from_dist(v_target_dist_logits)
       # This creates the regularization term for rewards
       regularized_term = log_pi - (alpha * log_pi_prev + (1 - alpha) * log_pi_prev_) 
       
@@ -685,17 +694,17 @@ class RNaDDreamer():
       v_train_target, q_value = v_trace(v_target, expanded_valid, timestep.policy, pi, regularized_term, timestep.action, timestep.reward,
                                         self.config.lambda_vtrace, self.config.c_vtrace, self.config.rho_vtrace,
                                         self.config.eta, self.config.vtrace_eta, self.config.gamma_vtrace)
-      
+      #v_train_target, q_value = jnp.zeros_like(v), jnp.zeros_like(pi)
       # We multiply by 2, since each player acts
-      normalization = jnp.sum(timestep.valid) * 2 
-      v_loss = jnp.sum((expanded_valid * (v - lax.stop_gradient(v_train_target)) ** 2)) / (normalization + (normalization == 0))
-      
+      normalization = jnp.sum(timestep.valid) * 2
+      #v_loss = jnp.sum((expanded_valid * (v - lax.stop_gradient(v_train_target)) ** 2)) / (normalization + (normalization == 0))
+      v_loss = -get_bin_log_prob(v_dist_logits, bins, jax.lax.stop_gradient(v_train_target))
+      v_loss_value = jnp.sum(v_loss * expanded_valid) / (normalization + (normalization == 0))
+
       # Each Q is multiplied by product of importance_sampling of opponent and inverted sampling policy by the acting player.
       # This computes counterfactual importance sampling
-      # This counterfactual correction allows for an-off policy
-      # RNaD.
-      sampling_policy = jnp.sum(timestep.policy * timestep.action, axis=-1, keepdims=True)
-      network_policy = jnp.sum(pi * timestep.action, axis=-1, keepdims=True)
+      sampling_policy = jnp.sum(timestep.policy * timestep.action, axis=-1, keepdims=True) * expanded_valid + (1 - expanded_valid)
+      network_policy = jnp.sum(pi * timestep.action, axis=-1, keepdims=True)* expanded_valid + (1 - expanded_valid)
       
       # We do not take into account the player reaches, since infoset is always reached with the same prob
       sampling_policy = jnp.prod(sampling_policy, axis=-2, keepdims=True)
@@ -712,7 +721,7 @@ class RNaDDreamer():
       # The multiplication by -1 is critical here, otherwise we would
       # be minimizing the neurd term, but we want to maximize it.
       neurd_loss_value = -jnp.sum(loss_neurd * expanded_valid) / (normalization + (normalization == 0))
-      return v_loss + neurd_loss_value
+      return v_loss_value + neurd_loss_value
       
     loss, grad = nnx.value_and_grad(rnad_loss, argnums=0)(optimizers.rnad_optimizer.model, optimizers.rnad_target_optimizer.model, prev_network, _prev_network, timestep, alpha)
 
