@@ -6,8 +6,12 @@ import numpy as np
 
 from train_utils import get_reference_policy
 from games.jax_game import JaxGame, GameState
+from experiments.tree_view_utils import *
 from dreamer import Dreamer
 from dreamer_ma import DreamerMA
+
+
+
 
 
 @chex.dataclass
@@ -32,7 +36,9 @@ def get_next_outcomes(model: DreamerMA| Dreamer, stoch_state: chex.Array,
 
   obs = np.asarray(obs)
   num_next_obs = obs.shape[0]
+  num_categoricals = stoch_state.shape[0]
   next_deters = [[] for _ in range(num_next_obs)]
+  probs = [[] for _ in range(num_next_obs)]
   # Next obs has shape [num_next, num_players, iset_size] for multi-agent
   # and [num_next, obs_size] for single agent
   is_ma = obs.ndim == 3
@@ -48,41 +54,13 @@ def get_next_outcomes(model: DreamerMA| Dreamer, stoch_state: chex.Array,
 
   combinations = cartesian_product(*per_class_valids)
   for comb in combinations:
+    prob = stoch_state[np.arange(num_categoricals), comb]
     sampled_deter = jax.nn.one_hot(comb, stoch_state.shape[-1])
     next_closest_idx = get_closes_func(model, hidden_state, sampled_deter, obs)
     next_deters[next_closest_idx].append(sampled_deter)
+    probs[next_closest_idx].append(prob)
     
-
-  # chance_max_probs, chance_max_indices = jax.lax.top_k(stoch_state, num_chance_outcomes)
-  # chance_probs =  1 / num_chance_outcomes
-  # #Find the categorical that is closest to the uniform distribution
-  # uniform_distance = jnp.sum((chance_max_probs - chance_probs) ** 2, axis=-1)
-  # chance_dist_idx = jnp.argmin(uniform_distance)
-  # uniform_categorical = chance_max_probs[chance_dist_idx, :]
-  # uniform_categorical_indices = chance_max_indices[chance_dist_idx, :]
-  # #repr_two_max_probs, _ = jax.lax.top_k(repr_stoch_state, 2)
-  # if is_chance:
-  #   if jnp.max(jnp.abs(chance_probs - uniform_categorical)) >= eps:
-  #     distribution_mismatch = 1
-  #     if verbose:
-  #       print(f"Stochastic state differs from a stochastic uniform by more than {eps}")
-  #       print(f"Stochastic state  max probs {uniform_categorical}")
-  # #     #print(f"Represented (posterior) stochastic state two max probs {repr_two_max_probs}")
-  # else:
-  #   if jnp.max(jnp.abs(1 - max_probs)) >= eps:
-  #     distribution_mismatch = 1
-  #     if verbose:
-  #       print(f"Stochastic state differs from deterministic more than {eps}")
-  #       print(f"Stochastic state max probs {max_probs}")
-  #     #print(f"Represented (posterior) stochastic state max probs {repr_max_probs}")
-
-  # chance_max_dets = jax.nn.one_hot(uniform_categorical_indices, stoch_state.shape[-1], axis=-1)
-  # deter_state = jax.nn.one_hot(max_indices, stoch_state.shape[-1], axis=-1)
-  # def _make_det_from_chance(chance_det, chance_idx, argmax_state):
-  #   return jnp.concatenate([argmax_state[:chance_idx, :], chance_det[None, ...], argmax_state[chance_idx + 1:, :]], axis=0)
-  # next_deters = [_make_det_from_chance(det, chance_dist_idx, deter_state) for det in chance_max_dets] if is_chance else [deter_state]
-
-  return next_deters
+  return next_deters, probs
 
 def get_closest_next(model: Dreamer, hidden_state, next_deter, next_obs:np.ndarray):
   """Find the index of the closest next state
@@ -189,7 +167,8 @@ def create_iset_map(curr_iset, amount_actions, curr_legal):
 def model_walk_test(model:Dreamer|DreamerMA,
                     all_outcome_check_fn,
                     one_outcome_check_fn,
-                     difference_eps = 0.2, probability_eps = 0.05, probability_threshold=0.05, verbose=False):
+                     difference_eps = 0.2, probability_eps = 0.05, probability_threshold=0.05
+                     , verbose=False, visualise_tree = False):
   """Walk through the entire game tree in each state, check
   all learned outcomes where the individual components of the deterministic
   state have probability outcome over probability eps. Then perform a tree based
@@ -228,9 +207,10 @@ def model_walk_test(model:Dreamer|DreamerMA,
   get_obs_fn = get_both_obs if is_ma else get_single_obs
   #get_closest_deter_fn = get_closest_deter_ma if is_ma else get_closest_deter
   num_players = model.game.num_players()
-  mistake_cum_probs = 0
-  num_visited_states = 0
+  mistake_probs = 0
+  visited = {}
   vectorized_get_obs = jax.vmap(get_both_obs, in_axes=(0), out_axes=(0))
+  model_tree_root = Node("Root", data={"type": PAST_ACTION, "action": -1}) if visualise_tree else  None
 
   def get_stoch_from_prediction(logits: chex.Array):
     stoch_unfiltered = np.asarray(jax.nn.softmax(logits, axis=-1))
@@ -238,17 +218,32 @@ def model_walk_test(model:Dreamer|DreamerMA,
     stoch = stoch_unnormalized / np.sum(stoch_unnormalized, axis=-1, keepdims=True)
     return stoch
 
-  def _tree_walk(carry: WalkCarry, depth=0):
-    nonlocal num_visited_states
-    nonlocal mistake_cum_probs
-    num_visited_states += 1
+  def _tree_walk(carry: WalkCarry, depth=0, reach_probability:float = 1.0, action_outcome_history = "",
+                 subtree_parent: Node = None, outcome:int = -1, outcome_prob: float = 0, create_model_node:bool = False):
+    nonlocal mistake_probs
+
+    visited[action_outcome_history] = True
+    if verbose:
+      print(f"Checking state {carry.game_state}")
+      print(f"Reach probs {reach_probability}")
     #print(f"Num visited states {num_visited_states}")
     # if carry.terminal:
     #   mistake_cum_probs = mistake_cum_probs + all_outcome_check_fn(model, carry, difference_eps, probability_threshold, verbose)
     #   return
     # else:
 
-    mistake_cum_probs  = mistake_cum_probs + one_outcome_check_fn(model, carry, difference_eps, verbose)
+    state_mistake_probs, state_differences = one_outcome_check_fn(model, carry, difference_eps, verbose)
+    parent = subtree_parent
+    if visualise_tree and create_model_node:
+      deter_path = parent.name + f"d{outcome}"
+      #print(f"Storing node with id {deter_path} and parent {parent.name}")
+      deter_node = Node(deter_path,
+                      parent = parent,
+                      data = {"differences" : state_differences, 
+                              "prob": outcome_prob,
+                              "type": MODEL_NODE})
+      parent = deter_node
+    mistake_probs  = mistake_probs + (state_mistake_probs * reach_probability)
     if carry.terminal:
       return
     pi = np.asarray(get_reference_policy(carry.game_state, carry.legals))
@@ -263,6 +258,13 @@ def model_walk_test(model:Dreamer|DreamerMA,
     #print(f"Joint actions: {joint_actions}")
     for a in joint_actions:
       #print(f"Applying action {a}")
+      action_parent = parent
+      if visualise_tree:
+        action_path = parent.name + f"a{a}"
+        action_node = Node(action_path,
+                         parent = action_parent,
+                         data = {"type": PAST_ACTION, "action": a})
+        action_parent = action_node
       next_state, next_terminal, next_reward, next_legals = model.game.apply_action(carry.game_state, a)
       ai_oh = jax.nn.one_hot(a, carry.legals.shape[-1])
       next_hidden = model.get_next_hidden(model.optimizers.sequence_optimizer.model, carry.hidden_state, carry.deter_state, ai_oh)
@@ -283,18 +285,26 @@ def model_walk_test(model:Dreamer|DreamerMA,
         next_terminals = np.asarray(next_terminal)[None, ...]
         next_rewards = np.asarray(next_reward)[None, ...]
         next_legals = np.asarray(next_legals)[None, ...]
-      if verbose:
-        print(f"Checking state {next_state}")
       next_obs = vectorized_get_obs(next_states)
-      next_deters= get_next_outcomes(model, next_stoch_state, next_hidden, next_obs, probability_eps, verbose=verbose)
-
+      next_deters, next_probs= get_next_outcomes(model, next_stoch_state, next_hidden, next_obs, probability_eps, verbose=verbose)
+      #print(f"Next deters: {next_deters}")
       for i in range(next_terminals.shape[0]):
+        outcome_parent = action_parent
         next_terminal = next_terminals[i]
         next_reward = next_rewards[i]
         next_legal = next_legals[i]
         next_state = jax.tree_util.tree_map(lambda x: x[i], next_states)
         single_outcome_deters = next_deters[i]
-        for deter in single_outcome_deters:
+        single_outcome_probs = next_probs[i]
+        outcome_prob = np.sum(single_outcome_probs)
+        if next_terminals.shape[0] > 1  and visualise_tree:
+          outcome_path = parent.name + f"o{i}"
+          outcome_node = Node(outcome_path,
+                          parent=outcome_parent,
+                          data = {"prob": outcome_prob, "type": PAST_CHANCE})
+          outcome_parent = outcome_node
+        num_deters = len(single_outcome_deters)
+        for j, deter in enumerate(single_outcome_deters):
           new_carry = WalkCarry(legals= next_legal,
                                 game_state = next_state,
                                 hidden_state= next_hidden,
@@ -302,8 +312,13 @@ def model_walk_test(model:Dreamer|DreamerMA,
                                 deter_state=deter,
                                 reward=next_reward,
                                 terminal=next_terminal,
-                                after_chance=is_chance)    
-          _tree_walk(new_carry, depth+ 1 + int(is_chance))
+                                after_chance=is_chance)
+          prob = jnp.prod(next_stoch_state[deter.astype(jnp.bool)])  
+          _tree_walk(new_carry, depth = depth+ 1 + int(is_chance), subtree_parent = outcome_parent,
+                     action_outcome_history= action_outcome_history + f"a{a}o{i}",
+                     reach_probability= reach_probability * prob,
+                     outcome = j, outcome_prob=single_outcome_probs[j] / outcome_prob,
+                     create_model_node=num_deters > 1)
       #return
       #represented_next_stoch = jax.nn.softmax(model.optimizers.encoder_optimizer.model(next_hidden, real_obs), axis=-1)
       
@@ -319,9 +334,8 @@ def model_walk_test(model:Dreamer|DreamerMA,
     next_terminals = np.asarray(next_terminals)
     next_rewards = np.asarray(next_rewards)
     next_legals = np.asarray(next_legals)
-    #stoch_states = []
-    #deters = []
     for i in range(next_terminals.shape[0]):
+      outcome_parent = model_tree_root
       next_terminal = next_terminals[i]
       next_reward = next_rewards[i]
       next_legal = next_legals[i]
@@ -334,11 +348,21 @@ def model_walk_test(model:Dreamer|DreamerMA,
       # because they are differentiated by the observations.
       init_obs = get_obs_fn(next_state)[None, ...]
       #print(f"Init obs for outcome {i}, is {init_obs}")
-      if verbose:
-        print(f"Checking state {next_state}")
+      # if verbose:
+      #   print(f"Checking state {next_state}")
       init_stoch_state = get_stoch_from_prediction(model.get_encoder(model.optimizers.encoder_optimizer.model, init_hidden, init_obs))
-      init_deters = get_next_outcomes(model, init_stoch_state, init_hidden, init_obs, probability_eps, verbose)[0]
-      for deter in init_deters:
+      init_deters, init_probs = get_next_outcomes(model, init_stoch_state, init_hidden, init_obs, probability_eps, verbose)
+      init_deters = init_deters[0]
+      init_probs = init_probs[0]
+      outcome_path = f"o{i}"
+      outcome_prob = np.sum(init_probs)
+      if visualise_tree:
+        init_chance = Node(outcome_path,
+                         parent= outcome_parent,
+                         data = {"prob": outcome_prob, "type": PAST_CHANCE})
+        outcome_parent = init_chance
+      num_init_deters = len(init_deters)
+      for j, deter in enumerate(init_deters):
         init_carry = WalkCarry(legals= next_legal,
                               game_state = next_state,
                               hidden_state= init_hidden,
@@ -347,17 +371,26 @@ def model_walk_test(model:Dreamer|DreamerMA,
                               reward=next_reward,
                               terminal=next_terminal,
                               after_chance=init_chance)
-        #stoch_states.append(init_stoch_state)
-        #deters.append(init_deter)
-        _tree_walk(init_carry, depth=1)
-    avg_mistake_probs = mistake_cum_probs / num_visited_states
+        _tree_walk(init_carry, depth=1,
+                   action_outcome_history=f"o{i}",
+                   subtree_parent = outcome_parent,
+                     outcome = j, outcome_prob=init_probs[j] / outcome_prob,
+                     create_model_node=num_init_deters > 1)
+    num_visited_states = len(visited)
+    avg_mistake_probs = mistake_probs / num_visited_states
+    avg_mistake_probs = np.minimum(avg_mistake_probs, 1.0)
+    if visualise_tree:
+      render_tree(model_tree_root, model)
     return avg_mistake_probs
   init_obs = get_obs_fn(init_state)[None, ...]
   init_stoch_state = get_stoch_from_prediction(model.get_encoder(model.optimizers.encoder_optimizer.model, init_hidden, init_obs))
   if verbose:
     print(f"Checking state {init_state}")
-  init_deters = get_next_outcomes(model, init_stoch_state, init_hidden, init_obs, probability_eps, verbose)[0]
-  for deter in init_deters:
+  init_deters, init_probs = get_next_outcomes(model, init_stoch_state, init_hidden, init_obs, probability_eps, verbose)
+  init_deters = init_deters[0]
+  init_probs = init_probs[0]
+  num_init_deters = len(init_deters)
+  for i, deter in enumerate(init_deters):
     init_carry = WalkCarry(legals= init_legals,
                               game_state = init_state,
                               hidden_state= init_hidden,
@@ -365,8 +398,16 @@ def model_walk_test(model:Dreamer|DreamerMA,
                               deter_state=deter,
                               reward=jnp.array(0),
                               terminal=jnp.array(False),
-                              after_chance=jnp.array(False)) 
-    _tree_walk(init_carry)
-  avg_mistake_probs = mistake_cum_probs / num_visited_states
-  return avg_mistake_probs
+                              after_chance=jnp.array(False))
+    prob = jnp.prod(init_stoch_state[deter.astype(jnp.bool)])
+    _tree_walk(init_carry, subtree_parent = model_tree_root,  
+                    reach_probability=prob,
+                     outcome = i, outcome_prob=init_probs[i],
+                     create_model_node=num_init_deters > 1)
+  num_visited_states = len(visited)
+  avg_mistake_probs = mistake_probs / num_visited_states
+  avg_mistake_probs = np.minimum(avg_mistake_probs, 1.0)
+  if visualise_tree:
+    render_tree(model_tree_root, model)
+  return mistake_probs
 

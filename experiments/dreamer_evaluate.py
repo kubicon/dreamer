@@ -19,6 +19,7 @@ parser.add_argument("--seed", type=int, default=-1, help="Seed for the key to be
 
 parser.add_argument("--verbose", action="store_true", help="A flag whether to also print information about states being checked")
 
+parser.add_argument("--render_tree", action="store_true", help="A flag whether to create the model EFG-style tree and render it.")
 
 
 
@@ -66,33 +67,38 @@ def check_state_one_outcome(model: Dreamer, carry: WalkCarry,  eps: float, verbo
   """Check whether the given sampled deterministic state
   produces valid output. Used for checking one particular chance outcome"""
   mistake_probs = np.zeros(3)
+  differences = np.zeros(3)
   real_obs = model.game.get_info(carry.game_state)[1]
   #print(f"Checking state {carry.game_state}, closest outcome")
   decoded_obs = model.get_decoder(model.optimizers.decoder_optimizer.model, carry.hidden_state, carry.deter_state)
   pred_reward, pred_terminal = model.get_reward_and_terminal(model.optimizers.predictor_optimizer.model, carry.hidden_state, carry.deter_state)
   max_dif = jnp.max(jnp.abs(real_obs - decoded_obs))
+  reward_dif = jnp.abs(carry.reward - pred_reward)
+
+  differences[0] = max_dif
   if max_dif >= eps:
     mistake_probs[0] = 1
     #print(f"Real obs and decoded obs differ by more than {eps}.")
     #print(f"Max difference: {max_dif}")
     # print(f"Real obs {real_obs}")
     # print(f"Decoded obs {decoded_obs}")
+  differences[1] = int(pred_terminal != carry.terminal)
   if pred_terminal != carry.terminal:
     mistake_probs[1] = 1
     #print(f"Predicted terminal {pred_terminal} does not match real terminal {carry.terminal}.")
-  if jnp.abs(carry.reward - pred_reward) >= eps:
+  differences[2] = reward_dif
+  if reward_dif >= eps:
     mistake_probs[2] = 1
     #print(f"Predicted reward {pred_reward} differs from real reward {carry.reward} by more than {eps}.")
   #breakpoint()
    #Ordered as observation, terminal, reward
-  return mistake_probs
+  return mistake_probs, differences
 
 def main():
   args = parser.parse_args()
   model_dir = args.model_dir
   steps = []
   all_mistake_probs = []
-  distribution_mismatch_probs = []
   if not model_dir.startswith("/"):
     model_dir = os.getcwd() + "/" + model_dir
   if not os.path.exists(model_dir):
@@ -115,7 +121,8 @@ def main():
     mistake_probs = model_walk_test(model,
                     all_outcome_check_fn = check_state_all_outcomes,
                     one_outcome_check_fn = check_state_one_outcome,
-                    verbose=args.verbose)
+                    verbose=args.verbose,
+                    visualise_tree=args.render_tree)
     all_mistake_probs.append(mistake_probs)
     steps.append(step)
     # print(f"Obs average mistake probability {mistake_probs[0]}")

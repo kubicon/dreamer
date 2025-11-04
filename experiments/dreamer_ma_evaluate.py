@@ -20,7 +20,7 @@ parser.add_argument("--model_dir", type=str, default="trained_networks/dreamer/g
 parser.add_argument("--restore_step", type=int, default=-1, help="Saved step of the model to restore. If -1, checks all models within that folder.")
 
 parser.add_argument("--verbose", action="store_true", help="A flag whether to also print information about states being checked")
-
+parser.add_argument("--render_tree", action="store_true", help="A flag whether to create the model EFG-style tree and render it.")
 
 
 def check_state_all_outcomes(model: DreamerMA, carry: WalkCarry,  eps: float, outcome_threshold: float = 0.1, verbose = False):
@@ -82,36 +82,43 @@ def check_state_one_outcome(model: DreamerMA, carry:WalkCarry, eps:float, verbos
   produces valid results. Used for post-chance node states, to check 
   whether it corresponds to the correct outcome."""
   mistake_probs = np.zeros(5)
+  differences = np.zeros(5)
   _, real_p1_iset, real_p2_iset, _ = model.game.get_info(carry.game_state)
   p1_decoded_iset = model.get_decoder(model.optimizers.p1_decoder_optimizer.model, carry.hidden_state, carry.deter_state)
   p2_decoded_iset = model.get_decoder(model.optimizers.p2_decoder_optimizer.model, carry.hidden_state, carry.deter_state)
   pred_reward, pred_terminal, pred_legal = model.get_predictor(model.optimizers.predictor_optimizer.model, model.optimizers.legal_actions_optimizer.model, carry.hidden_state, carry.deter_state)
   p1_iset_max_difference = jnp.max(jnp.abs(real_p1_iset - p1_decoded_iset))
   p2_iset_max_difference = jnp.max(jnp.abs(real_p2_iset - p2_decoded_iset))
-  # The probability of mistake will be 1 here in any case,
-  # since the supplied deterministic state was already checked 
-  # to be the best fitting one
+  reward_difference = jnp.abs(carry.reward - pred_reward)
+  legal_diference = not carry.terminal and jnp.any(pred_legal != carry.legals)
+  det_prob = jnp.prod(carry.stoch_state[carry.deter_state.astype(jnp.bool)])
+
+  differences[0] = p1_iset_max_difference
   if p1_iset_max_difference >= eps:
-    mistake_probs[0] = 1
+    mistake_probs[0] = det_prob
     #print(f"Real iset and decoded iset for player 1 differ by more than {eps}.")
     #print(f"Max difference {p1_iset_max_difference}")
+  differences[1] = p2_iset_max_difference
   if p2_iset_max_difference >= eps:
-    mistake_probs[1] = 1
+    mistake_probs[1] = det_prob
     #print(f"Real iset and decoded iset for player 2 differ by more than {eps}.")
     #print(f"Max difference {p2_iset_max_difference}")
+  differences[2] = int(pred_terminal != carry.terminal)
   if pred_terminal != carry.terminal:
-    mistake_probs[2] = 1
+    mistake_probs[2] = det_prob
     #print(f"Predicted terminal {pred_terminal} does not match real terminal {carry.terminal}. ")
-  if jnp.abs(carry.reward - pred_reward) >= eps:
-    mistake_probs[3] = 1
+  differences[3] = reward_difference
+  if reward_difference >= eps:
+    mistake_probs[3] = det_prob
     #print(f"Predicted reward {pred_reward} differs from real reward {carry.reward} by more than {eps}.")
   #Do not check legal actions in terminal states
-  if not carry.terminal and jnp.any(pred_legal != carry.legals):
-    mistake_probs[4] = 1
+  differences[4] = int(legal_diference)
+  if legal_diference:
+    mistake_probs[4] = det_prob
     #print(f"Predicted legal actions {pred_legal} do not match real legal actions {carry.legals}.")
-  #breakpoint()
   #Ordered p1_iset, p2_iset, terminal, reward, legals
-  return mistake_probs
+  #print(f"Mistake probs {mistake_probs}")
+  return mistake_probs, differences
 
 def main():
   args = parser.parse_args()
@@ -172,7 +179,8 @@ def main():
     mistake_probs = model_walk_test(model,
                     all_outcome_check_fn = check_state_all_outcomes,
                     one_outcome_check_fn = check_state_one_outcome,
-                    verbose=args.verbose)
+                    verbose=args.verbose,
+                    visualise_tree=args.render_tree)
     all_mistake_probs.append(mistake_probs)
     steps.append(step)
     print(f"Mistake probs {mistake_probs}")
@@ -212,6 +220,7 @@ def main():
   if not os.path.exists(plt_dir):
     os.makedirs(plt_dir)
   plt.savefig(f"{plt_dir}/{model.game.game_name()}{params_str}.pdf")
+  print(f"Saved plot at {plt_dir}/{model.game.game_name()}{params_str}.pdf")
 
 if __name__ == "__main__":
   main()
