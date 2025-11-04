@@ -8,9 +8,12 @@ import time
 import matplotlib.pyplot as plt
 
 
-from train_utils import load_model
+from train_utils import load_model, uniform_policy, DreamerMAConfig, RNaDConfig
 from experiments.eval_utils import cartesian_product, stringify, find_closest_index, create_iset_map, unroll_chance_node
 from games.jax_game import JaxGame, GameState
+from games.jax_leduc import JaxLeduc
+from replay_buffer import ReplayBuffer
+from dreamer_ma import DreamerMA
 from rnad_dreamer import RNaDDreamer, RNaDConfig
 from rnad_dreamer_joint import RNaDDreamerJoint
 
@@ -69,7 +72,7 @@ def model_walk_deterministic(model:RNaDDreamer):
     init_state, init_legals = game.initialize_structures()
     _tree_walk(init_state, init_legals)
 
-def extract_model_policy(model: RNaDDreamer)-> tuple[list, list]:
+def extract_model_policy(model :RNaDDreamerJoint)-> tuple[list, list]:
   """Extracts policies for the whole game from the RNaD model and 
   returns them as per depth
   iset map and behavioral policies."""
@@ -86,6 +89,7 @@ def extract_model_policy(model: RNaDDreamer)-> tuple[list, list]:
   vectorized_chance_info = jax.vmap(game.get_outcomes_and_probs, in_axes=0, out_axes=(0, 0))
   #vmap over the H(D) dimension first and then over the player dimension
   vectorized_get_policy = nnx.vmap(nnx.vmap(model._jit_get_policy, in_axes=(None, 0, 0), out_axes=0), in_axes=(None, 0, 0), out_axes=0)
+  #vectorized_get_policy = nnx.vmap(nnx.vmap(uniform_policy, in_axes=(0, 0), out_axes=0), in_axes=(0, 0), out_axes=0)
   def _tree_walk(game_states: GameState, legals_non_padded: jax.Array, depth=0):
      # Denoting this as A(D)
     max_actions = max(game.depth_chance_outcomes(depth), game_actions)
@@ -125,7 +129,7 @@ def extract_model_policy(model: RNaDDreamer)-> tuple[list, list]:
     p1_legal, p2_legal = legals[0], legals[1]
     legal = p1_legal[..., None] * p2_legal[..., None, :]
 
-    pi = vectorized_get_policy(model.optimizers.rnad_optimizer.model, jnp.asarray(iset_map), jnp.asarray(iset_legal))
+    pi = vectorized_get_policy(jnp.asarray(iset_map), jnp.asarray(iset_legal))
     
     
     p1_actions = np.reshape(np.tile(np.repeat(np.arange(max_actions), max_actions), curr_iset.shape[1]), (curr_iset.shape[1], -1))
@@ -709,6 +713,10 @@ def test_nash(args, saved_nash_path: str):
   print(f"Evaluating policy of model loaded from {model_path} against nash policy loaded from {saved_nash_path}")
 
   model = load_model(model_path)
+  # game = JaxLeduc()
+  # buffer = ReplayBuffer(game, 0, 0, 100)
+  # dreamer_model = DreamerMA(DreamerMAConfig(), buffer)
+  # model = RNaDDreamerJoint(dreamer_model, RNaDConfig())
   assert isinstance(model, RNaDDreamer) or isinstance(model, RNaDDreamerJoint), f"The given model should be an instance of RNaDDreamer or RNaDDreamerJoint, not {model.__class__}"
   if not model.config.use_learned_model:
     print(f"The model is learned on the real game {model.world_model.game.game_name()}")
@@ -721,6 +729,10 @@ def test_nash(args, saved_nash_path: str):
   print(f"Found nash values: {found_p1_nash} {found_p2_nash}")
   assert np.isclose(found_p1_nash, p1_nash_val, atol=1e-5), f"Found nash value {found_p1_nash} and saved nash value {p1_nash_val} for player 1 differ!"
   assert np.isclose(found_p1_nash, p1_nash_val, atol=1e-5), f"Found nash value {found_p2_nash} and saved nash value {p2_nash_val} for player 2 differ!"
+  p2_br_val, p1_br_val, p1_br, p2_br = model_best_response(model, (nash_iset_map, nash_behaviorals))
+  print(f"Found nash exploitabilities:")
+  print(f"P2 best response value against p1: {p2_br_val}")
+  print(f"P1 best response value against p2 {p1_br_val}")
   model_p1_val, model_p2_val = policy_expected_value(model.world_model.game, (model_map, model_behaviorals))
   model_p1_val, model_p2_val = args.scale_factor * model_p1_val, args.scale_factor * model_p2_val
   print(f"Model values {model_p1_val}, {model_p2_val}")

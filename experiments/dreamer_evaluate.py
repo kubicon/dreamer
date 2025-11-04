@@ -112,12 +112,11 @@ def main():
     model = load_model(model_path)
     assert isinstance(model, Dreamer), f"Loaded model should be an instance of multi agent Dreamer not {model.__class__}"
     print(f"Restored model from {model_path}")
-    mistake_probs, distribution_mismatch_prob = model_walk_test(model,
+    mistake_probs = model_walk_test(model,
                     all_outcome_check_fn = check_state_all_outcomes,
                     one_outcome_check_fn = check_state_one_outcome,
                     verbose=args.verbose)
     all_mistake_probs.append(mistake_probs)
-    distribution_mismatch_probs.append(distribution_mismatch_prob)
     steps.append(step)
     # print(f"Obs average mistake probability {mistake_probs[0]}")
     # print(f"Terminal average mistake probability {mistake_probs[1]}")
@@ -128,13 +127,10 @@ def main():
                             "where restore_step is either the specified number, or arbitrary integer if -1.")
   all_mistake_probs = np.asarray(all_mistake_probs)
   steps = np.asarray(steps)
-  distribution_mismatch_probs = np.asarray(distribution_mismatch_probs)
   sort_indices = np.argsort(steps)
   sorted_mistake_probs = all_mistake_probs[sort_indices]
   sorted_steps = steps[sort_indices]
-  sorted_dist_mismatch_probs = distribution_mismatch_probs[sort_indices]
   fig, ax = plt.subplots()
-  ax.plot(sorted_steps, sorted_dist_mismatch_probs, label="Mismatch of learned and real state distribution.")
   ax.plot(sorted_steps, sorted_mistake_probs[:, 0], label="Observation")
   ax.plot(sorted_steps, sorted_mistake_probs[:, 1], label="Terminal")
   ax.plot(sorted_steps, sorted_mistake_probs[:, 2], label="Reward")
