@@ -19,10 +19,11 @@ def train_rnad(args):
     model = load_model(args.saved_model_file)
     assert isinstance(model, RNaDDreamer), f"The loaded model should be an instance of RNaDDreamer, not {model.__class__}"
   else:
+    use_learned_model = not args.use_real_environment
     config = RNaDConfig(
         batch_size=args.batch_size,
         seed=args.trajectory_seed,
-        use_learned_model = args.use_learned_model,
+        use_learned_model = use_learned_model,
         bin_range = args.bin_range,
 
         beta_imagination = args.beta_imagination,

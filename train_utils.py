@@ -217,6 +217,9 @@ def get_reference_policy(game_state: GameState, legal_actions: chex.Array):
   TODO: This is just for the basic testing, change this function"""
   return legal_actions / legal_actions.sum(axis=-1, keepdims=True)
 
+def uniform_policy(iset: chex.Array, legal_actions: chex.Array):
+  return legal_actions / legal_actions.sum(axis=-1, keepdims=True)
+
 
 def save_model(model, path): 
   os.makedirs(os.path.dirname(path), exist_ok=True)

@@ -316,8 +316,8 @@ class RNaDDreamer():
         sizes=self.config.entropy_schedule_size,
         repeats=self.config.entropy_schedule_repeats)
     
-    self.prev_network = RNaDNetwork(self.iset_size, self.actions, self.config.rnad_network_details[0], self.config.rnad_network_details[1], rngs=self.nnx_rngs)
-    self._prev_network = RNaDNetwork(self.iset_size, self.actions, self.config.rnad_network_details[0], self.config.rnad_network_details[1], rngs=self.nnx_rngs)
+    self.prev_network = RNaDNetwork(self.iset_size, self.actions, self.config.bin_range, self.config.rnad_network_details[0], self.config.rnad_network_details[1], rngs=self.nnx_rngs)
+    self._prev_network = RNaDNetwork(self.iset_size, self.actions, self.config.bin_range, self.config.rnad_network_details[0], self.config.rnad_network_details[1], rngs=self.nnx_rngs)
     self.optimizers = initialize_rnad_optimizers(self.config, self.iset_size, self.actions, self.nnx_rngs)
     self.cached_step = nnx.cached_partial(self._jit_step, self.optimizers, self.prev_network, self._prev_network, self.world_model.optimizers)
     self.learner_steps = 0
@@ -630,7 +630,13 @@ class RNaDDreamer():
     # and the actual reward will be returned in the chance node, we need to filter
     # out the reward one step BEFORE the chance node
     non_chance = jnp.nonzero(~is_chance, size=self.non_chance_trajectory_max)[0]
+    #Also, need to filter out the initial chance node reward, since it will not
+    # be filtered out by this mask. We make the assumption that the
+    # initial chance node produces no reward here
+    is_init_chance = nnx.one_hot(is_chance[0] - 1, next_chance.shape[0]).astype(next_chance.dtype) 
+    next_chance = next_chance + is_init_chance
     non_next_chance = jnp.nonzero(~next_chance, size=self.non_chance_trajectory_max)[0]
+    #Taking advantage of -1 encoded as all zeros
     filtered_timestep = RNaDTimeStep(obs = jnp.take_along_axis(timestep.obs, non_chance[..., None, None], axis=0),
                                     legal = jnp.take_along_axis(timestep.legal, non_chance[..., None, None], axis=0),
                                     action = jnp.take_along_axis(timestep.action, non_chance[..., None, None], axis=0),
@@ -758,7 +764,6 @@ class RNaDDreamer():
                                           world_model_optimizers.encoder_optimizer.model,
                                           world_model_optimizers.p1_decoder_optimizer.model,
                                           world_model_optimizers.p2_decoder_optimizer.model)
-    
     alpha, update_regularization = self._entropy_schedule(learner_steps)
     
     prev_network, _prev_network, loss = self.update_parameters(

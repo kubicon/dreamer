@@ -546,6 +546,8 @@ def test_loaded(args):
   model = None
   plot_subdir_str = "rnad_only"
   for filename in os.listdir(model_dir):
+    if not os.path.isfile(os.path.join(model_dir, filename)):
+      continue
     name, filetype = filename.split(".")
     if not filetype == "pkl":
       continue

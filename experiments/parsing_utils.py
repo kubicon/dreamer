@@ -60,7 +60,7 @@ def add_rnad_arguments(parser: ArgumentParser, joint_train: bool =False) ->Argum
   parser.add_argument("--eta", type=float, default=0.2, help="Strenght of the regularization in RNaD. Used for the reward transformation and the KL regularization for V-trace.")
   parser.add_argument("--vtrace_eta", type=float, default=0.2, help="Strenght of the additional KL regularization term in V-trace.")
   parser.add_argument("--sampling_epsilon", type=float, default=0.0, help="Defines mix of uniform policy to the network learned policy during trajectory sampling.")
-  parser.add_argument("--use_learned_model", type=bool, default=True, help="Whether to use the Dreamer learned model for trajectory sampling. If not, trajectories are sampled from the game. Just for debugging.")
+  parser.add_argument("--use_real_environment", action="store_true", help="Whether to use the real game for trajectory sampling. If not, trajectories are sampled from the Dreamer model. Just for debugging.")
   parser.add_argument(f"--{diff_string}bin_range", type=int, default=20, help="Number of the exponentially spaced bins for the value categorical distribution prediction")
 
   #Dreamer model extraction parameters
@@ -78,8 +78,8 @@ def add_rnad_arguments(parser: ArgumentParser, joint_train: bool =False) ->Argum
   parser.add_argument(f"--{diff_string}trajectory_seed", type=int, default=-1, help="Random seed for trajectory generation")
 
   ##Entropy schedule- network switching
-  parser.add_argument("--entropy_schedule_size", default=(100,), help="Defines how many iterations should be done for each item in the sequence.")
-  parser.add_argument("--entropy_schedule_repeats", default=(1,), help="Defines amount of network switching sequences for each item in the sequence. Make sure last element is 1. For details see the EntropySchedule class.")
+  parser.add_argument("--entropy_schedule_size", default=(100, 1000), help="Defines how many iterations should be done for each item in the sequence.")
+  parser.add_argument("--entropy_schedule_repeats", default=(10,1), help="Defines amount of network switching sequences for each item in the sequence. Make sure last element is 1. For details see the EntropySchedule class.")
 
   ##V-Trace paraemters
   parser.add_argument("--rho_vtrace", type=float, default=1.0, help="Rho clipping parameter for V-Trace")

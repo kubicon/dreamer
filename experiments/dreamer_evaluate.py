@@ -104,6 +104,8 @@ def main():
   if not os.path.exists(model_dir):
       raise FileNotFoundError(f"Model directory {model_dir} does not exist.")
   for filename in os.listdir(model_dir):
+    if not os.path.isfile(os.path.join(model_dir, filename)):
+      continue
     name, filetype = filename.split(".")
     if not filetype == "pkl":
       continue

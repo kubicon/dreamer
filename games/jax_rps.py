@@ -35,7 +35,7 @@ class JaxRPS(JaxGame):
     return self.information_state_tensor_shape() - 2
    
   def information_state_tensor_shape(self):
-    return 5 # 2 for player encoding, 2 is to differentiate the winner. 0 for player 1, 1 for player 2, -1 for tie, 1 for the terminal flag
+    return 7 # 2 for player encoding, 2 for the terminal flag, 3 for player 1 points
     # this is just the observation tensor of the current state, but because the game is only a single turn, it corresponds
     # to the perfect recall iset 
 
@@ -66,8 +66,8 @@ class JaxRPS(JaxGame):
   @functools.partial(jax.jit, static_argnums=(0,))
   def get_info(self, game_state:RPSSTate):
     # Taking advantage of -1 being encoded as all zeros
-    terminal_oh = jax.nn.one_hot(game_state.terminal - 1, 1) 
-    p1_points_oh = jax.nn.one_hot(game_state.p1_points, 2)
+    terminal_oh = jax.nn.one_hot(game_state.terminal, 2) 
+    p1_points_oh = jax.nn.one_hot(game_state.p1_points + 1, 3)
     state_tensor = jnp.concatenate([terminal_oh.ravel(), p1_points_oh.ravel()], axis=0)
     p1_iset_tensor = jnp.concatenate([jax.nn.one_hot(0, 2), state_tensor], axis=0)
     p2_iset_tensor = jnp.concatenate([jax.nn.one_hot(1, 2), state_tensor], axis=0)
@@ -125,8 +125,8 @@ class JaxStochasticRPS(JaxGame):
     return self.information_state_tensor_shape() - 2
    
   def information_state_tensor_shape(self):
-    return 7 # 2 for distinguishing player 1 for terminal flag, 2 for player 1 points
-  # which differentiates the winner and 2 for encoding the type of game
+    return 12 # 2 for distinguishing player 2 for terminal flag, 5 for player 1 points
+  # which differentiates the winner and 3 for encoding the type of game
   # being played
 
   def observation_tensor_shape(self):
@@ -149,17 +149,17 @@ class JaxStochasticRPS(JaxGame):
   def initialize_structures(self):
     game_state = JaxStochasticRPSState(terminal = jnp.array(False, dtype=bool),
                           is_chance = jnp.array(True, dtype=bool),
-                          p1_points = jnp.array(0, dtype=jnp.int8),
+                          p1_points = jnp.array(-3, dtype=jnp.int8),
                           game_type = jnp.array(-1, dtype=jnp.int8))
     return game_state, jnp.ones((2, self.actions), dtype=jnp.int8)
 
   
   @functools.partial(jax.jit, static_argnums=(0,))
   def get_info(self, game_state:JaxStochasticRPSState):
-    # Taking advantage of -1 being encoded as all zeros
-    terminal_oh = jax.nn.one_hot(game_state.terminal - 1, 1) 
-    p1_points_oh = jax.nn.one_hot(game_state.p1_points, 2)
-    game_played_oh = jax.nn.one_hot(game_state.game_type - 1, self.game_types - 1)
+    terminal_oh = jax.nn.one_hot(game_state.terminal.astype(int), 2)
+    #The p1 points span range [-2, ..., 2], so ve need to represent 5 values 
+    p1_points_oh = jax.nn.one_hot(game_state.p1_points + 2, 5)
+    game_played_oh = jax.nn.one_hot(game_state.game_type, self.game_types)
     state_tensor = jnp.concatenate([terminal_oh.ravel(), p1_points_oh.ravel(), game_played_oh.ravel()], axis=0)
     state_tensor = jnp.where(game_state.is_chance, jnp.zeros_like(state_tensor), state_tensor)
     p1_iset_tensor = jnp.concatenate([jax.nn.one_hot(0, 2), state_tensor], axis=0)

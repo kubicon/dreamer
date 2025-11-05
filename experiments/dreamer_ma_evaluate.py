@@ -138,6 +138,8 @@ def main():
   model = None
   plot_subdir_str = "dreamer_only"
   for filename in os.listdir(model_dir):
+    if not os.path.isfile(os.path.join(model_dir, filename)):
+      continue
     name, filetype = filename.split(".")
     if not filetype == "pkl":
       continue
@@ -176,6 +178,7 @@ def main():
       #model.optimizers = model.update_nnx(model.optimizers, nnx.split(temp_model.optimizers)[1])
 
     print(f"Restored model from {model_path}")
+    #breakpoint()
     mistake_probs = model_walk_test(model,
                     all_outcome_check_fn = check_state_all_outcomes,
                     one_outcome_check_fn = check_state_one_outcome,
@@ -183,12 +186,12 @@ def main():
                     visualise_tree=args.render_tree)
     all_mistake_probs.append(mistake_probs)
     steps.append(step)
-    print(f"Mistake probs {mistake_probs}")
-    print(f"Player 1 iset average mistake probability {mistake_probs[0]}")
-    print(f"Player 2 iset average mistake probability {mistake_probs[1]}")
-    print(f"Terminal average mistake probability {mistake_probs[2]}")
-    print(f"Reward average mistake probability {mistake_probs[3]}")
-    print(f"Legal actions average mistake probability {mistake_probs[4]}")
+    # print(f"Mistake probs {mistake_probs}")
+    # print(f"Player 1 iset average mistake probability {mistake_probs[0]}")
+    # print(f"Player 2 iset average mistake probability {mistake_probs[1]}")
+    # print(f"Terminal average mistake probability {mistake_probs[2]}")
+    # print(f"Reward average mistake probability {mistake_probs[3]}")
+    # print(f"Legal actions average mistake probability {mistake_probs[4]}")
   print("Ended evaluation")
   print(f"Evaluation took {time.time() - start_time:.2f} seconds.")
   #profiler.stop()
