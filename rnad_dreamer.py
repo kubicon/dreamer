@@ -16,7 +16,7 @@ from functools import partial
 
 from dreamer_ma import DreamerMA, DreamerMAOptimizers
 from networks import initialize_rnad_optimizers, RNaDOptimizers, RNaDNetwork, IsetDecoder, Predictor, LegalActionsNetwork, DynamicsPredictor, SequenceModel, JointIsetEncoder
-from train_utils import RNaDConfig, RNaDTimeStep, load_model, save_model, symexp
+from train_utils import RNaDConfig, RNaDTimeStep, load_model, save_model, symexp, get_loss_mean_with_mask
 from distributions import sample_categorical, get_bin_log_prob
 from games.jax_game import GameState
 
@@ -431,7 +431,7 @@ class RNaDDreamer():
                         predictor: Predictor, legal_network: LegalActionsNetwork, encoder: JointIsetEncoder, p1_iset_decoder:IsetDecoder,
                         p2_iset_decoder: IsetDecoder) ->RNaDTimeStep:
     init_chance_sample_key, init_sample_key, trajectory_key, = jax.random.split(key, 3)
-    trajectory_key = jax.random.split(trajectory_key, self.trajectory_max)
+    trajectory_key = jax.random.split(trajectory_key, self.non_chance_trajectory_max)
   
     
     #get initial state from the environment
@@ -701,11 +701,9 @@ class RNaDDreamer():
                                         self.config.lambda_vtrace, self.config.c_vtrace, self.config.rho_vtrace,
                                         self.config.eta, self.config.vtrace_eta, self.config.gamma_vtrace)
       #v_train_target, q_value = jnp.zeros_like(v), jnp.zeros_like(pi)
-      # We multiply by 2, since each player acts
-      normalization = jnp.sum(timestep.valid) * 2
       #v_loss = jnp.sum((expanded_valid * (v - lax.stop_gradient(v_train_target)) ** 2)) / (normalization + (normalization == 0))
       v_loss = -get_bin_log_prob(v_dist_logits, bins, jax.lax.stop_gradient(v_train_target))
-      v_loss_value = jnp.sum(v_loss * expanded_valid) / (normalization + (normalization == 0))
+      v_loss_value = get_loss_mean_with_mask(v_loss, expanded_valid)
 
       # Each Q is multiplied by product of importance_sampling of opponent and inverted sampling policy by the acting player.
       # This computes counterfactual importance sampling
@@ -726,7 +724,7 @@ class RNaDDreamer():
       
       # The multiplication by -1 is critical here, otherwise we would
       # be minimizing the neurd term, but we want to maximize it.
-      neurd_loss_value = -jnp.sum(loss_neurd * expanded_valid) / (normalization + (normalization == 0))
+      neurd_loss_value = -get_loss_mean_with_mask(loss_neurd, expanded_valid)
       return v_loss_value + neurd_loss_value
       
     loss, grad = nnx.value_and_grad(rnad_loss, argnums=0)(optimizers.rnad_optimizer.model, optimizers.rnad_target_optimizer.model, prev_network, _prev_network, timestep, alpha)

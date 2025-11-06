@@ -7,51 +7,6 @@ import pickle
 
 from typing import Sequence, Tuple
 
-
-def symlog(x: chex.Array):
-  return jnp.sign(x) * jnp.log(jnp.abs(x) + 1)
-
-def symexp(x: chex.Array):
-  return jnp.sign(x) * (jnp.exp(jnp.abs(x)) - 1)
-
-def legal_policy(logit: chex.Array, legal: chex.Array):
-  """Get a softmaxed policy out of logit, with
-  zeros at illegal actions. Assumes that these have actions in the last
-  dimension and the same shape."""
-  chex.assert_equal_shape([logit, legal])
-  shifted_logit = logit - logit.max(axis=-1, keepdims=True)
-  exp_logit = jnp.exp(shifted_logit)
-  #The only way this can potentially break is 
-  # if +- inf or NaN appears already in the exp_logit
-  # at which point it is an error in the network
-  masked_exp_logit = exp_logit * legal
-  normalization = jnp.sum(masked_exp_logit, axis=-1, keepdims=True)
-  policy = masked_exp_logit / (normalization + (normalization == 0))
-  return policy
-
-def legal_log_policy(logit: chex.Array, legal: chex.Array):
-  """Uses a legal_policy to get the masked policy
-  and then return a log of it, with the exception
-  of illegal actions which have 0 instead of -inf. 
-  Assumes that these have actions in the last
-  dimension and the same shape."""
-  chex.assert_equal_shape([logit, legal])
-  policy = legal_policy(logit, legal)
-  #The where instead of * legal
-  # is because -inf * 0 would produce NaN
-  log_policy = jnp.where(legal, jnp.log(policy), 0)
-  return log_policy
-
-
-def get_loss_mean_with_mask(loss: chex.Array, mask: chex.Array) -> chex.Array:
-  """Mask a loss using mask and compute its mean, 
-  such that elements with 0 in the mask are correctly ignored.
-    Make sure loss and mask are of broadcastable dimensions. """
-  masked_loss = loss * mask
-  normalization_factor = jnp.sum(mask)
-  summed_loss = jnp.sum(masked_loss)
-  return summed_loss / (normalization_factor + (normalization_factor == 0))
-
   
 
 
@@ -211,6 +166,75 @@ class DreamerMAConfig():
   dynamics_network_details: tuple[int, int] = (256, 1)
   predictor_network_details: tuple[int, int] = (256, 1)
   legal_actions_network_details: tuple[int, int] = (256, 1)
+
+
+
+def symlog(x: chex.Array):
+  return jnp.sign(x) * jnp.log(jnp.abs(x) + 1)
+
+def symexp(x: chex.Array):
+  return jnp.sign(x) * (jnp.exp(jnp.abs(x)) - 1)
+
+def legal_policy(logit: chex.Array, legal: chex.Array):
+  """Get a softmaxed policy out of logit, with
+  zeros at illegal actions. Assumes that these have actions in the last
+  dimension and the same shape."""
+  chex.assert_equal_shape([logit, legal])
+  shifted_logit = logit - logit.max(axis=-1, keepdims=True)
+  exp_logit = jnp.exp(shifted_logit)
+  #The only way this can potentially break is 
+  # if +- inf or NaN appears already in the exp_logit
+  # at which point it is an error in the network
+  masked_exp_logit = exp_logit * legal
+  normalization = jnp.sum(masked_exp_logit, axis=-1, keepdims=True)
+  policy = masked_exp_logit / (normalization + (normalization == 0))
+  return policy
+
+def legal_log_policy(logit: chex.Array, legal: chex.Array):
+  """Uses a legal_policy to get the masked policy
+  and then return a log of it, with the exception
+  of illegal actions which have 0 instead of -inf. 
+  Assumes that these have actions in the last
+  dimension and the same shape."""
+  chex.assert_equal_shape([logit, legal])
+  policy = legal_policy(logit, legal)
+  #The where instead of * legal
+  # is because -inf * 0 would produce NaN
+  log_policy = jnp.where(legal, jnp.log(policy), 0)
+  return log_policy
+
+
+def get_loss_mean_with_mask(loss: chex.Array, mask: chex.Array) -> chex.Array:
+  """Mask a loss using mask and compute its mean, 
+  such that elements with 0 in the mask are correctly ignored.
+    Ensure loss and mask are of broadcastable shape. """
+  broadcasted_mask = jnp.zeros(loss.shape, mask.dtype) + mask
+  masked_loss = loss * broadcasted_mask
+  normalization_factor = jnp.sum(broadcasted_mask)
+  summed_loss = jnp.sum(masked_loss)
+  return summed_loss / (normalization_factor + (normalization_factor == 0))
+
+
+def get_percentiles_with_mask(data: chex.Array, mask:chex.Array, percentile: chex.Array):
+  """Get the given percentile of the data,
+  while ignoring the data given by mask. The percentile
+  should be a number (or array like of numbers) in range (0, 100).
+  The logic is that the percentile should only ensure that the given
+  percent of the unmasked data are under the returned value.
+  Ensure that data and mask are of broadcastable shape.
+     """
+  broadcasted_mask = jnp.zeros(data.shape, mask.dtype) + mask
+  max_val = jnp.max(data)
+  #mask out the invalid values with the maximum value
+  #that way we ensure they will be at the end after sorting
+  masked_data = broadcasted_mask * data + (1 - broadcasted_mask) * max_val
+
+  num_valid = jnp.sum(broadcasted_mask)
+  #Rescale the percentile. To accurately
+  # reflect we do not care about the invalid data at the end
+  scale_factor = num_valid / data.size
+  new_percentile = scale_factor * percentile
+  return jnp.percentile(masked_data, new_percentile)
   
 def get_reference_policy(game_state: GameState, legal_actions: chex.Array):
   """Returns the reference sampling policy. For now returns just a uniform policy.
