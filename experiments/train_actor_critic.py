@@ -3,10 +3,10 @@ import os
 
 from train_utils import load_model
 from dreamer_ma import DreamerMA
-from rnad_dreamer import RNaDConfig, RNaDDreamer
+from dreamer_actor_critic import ActorCriticConfig, DreamerActorCritic
 
 
-def train_rnad(args):
+def train_actor_critic(args):
   #profiler = Profiler()
   network_seed = args.network_seed
   trajectory_seed = args.trajectory_seed
@@ -17,44 +17,38 @@ def train_rnad(args):
   print(f"Using network seed: {network_seed}, trajectory seed: {trajectory_seed}")
   if args.saved_model_file and os.path.exists(args.saved_model_file):
     model = load_model(args.saved_model_file)
-    assert isinstance(model, RNaDDreamer), f"The loaded model should be an instance of RNaDDreamer, not {model.__class__}"
+    assert isinstance(model, DreamerActorCritic), f"The loaded model should be an instance of DreamerActorCritic, not {model.__class__}"
   else:
-    use_learned_model = not args.use_real_environment
-    config = RNaDConfig(
-        batch_size=args.batch_size,
+    config = ActorCriticConfig(
         seed=args.trajectory_seed,
         network_seed = args.network_seed,
-        use_learned_model = use_learned_model,
+        batch_size = args.batch_size,
+
         bin_range = args.bin_range,
 
         beta_imagination = args.beta_imagination,
         beta_real = args.beta_real,
 
+        #Strenght of the
+        # entropy exploration bonus
         eta=args.eta,
-        vtrace_eta = args.vtrace_eta,
-        sampling_epsilon=args.sampling_epsilon,
+
+        upper_percentile = args.upper_percentile,
+        lower_percentile = args.lower_percentile,
+        range_ema_coeff = args.range_ema_coeff,
 
         #Dreamer extraction parameters
         state_sample_threshold=args.state_sample_threshold,
         terminal_threshold = args.terminal_threshold,
         legal_threshold = args.legal_threshold,
-
-        # Entropy schedule parameters
-        entropy_schedule_size = args.entropy_schedule_size,
-        entropy_schedule_repeats = args.entropy_schedule_repeats,
         
-        #V-Trace parameters
-        rho_vtrace = args.rho_vtrace,
-        c_vtrace = args.c_vtrace,
-        gamma_vtrace = args.gamma_vtrace,
-        lambda_vtrace = args.lambda_vtrace,
-
-        # NeuRD parameters
-        neurd_clip = args.neurd_clip,
-        neurd_threshold = args.neurd_threshold,
+        #TD-estimate parameters
+        gamma = args.gamma,
+        td_lambda = args.td_lambda,
 
         # Ordered as (hidden_layer_features, num_hidden_layers)
-        rnad_network_details = (args.network_hidden_size, args.network_hidden_layers),
+        actor_network_details = (args.actor_hidden_size, args.actor_hidden_layers),
+        critic_network_details = (args.critic_hidden_size, args.critic_hidden_layers),
 
         learning_rate = args.learning_rate,
         target_network_update = args.target_network_update
@@ -67,7 +61,7 @@ def train_rnad(args):
       raise FileNotFoundError(f"The given Dreamer path {saved_model_dir} does not exist!")
     world_model = load_model(saved_model_dir)
     assert isinstance(world_model, DreamerMA), f"The world model is expected to be an instance of DreamerMA not {world_model.__class__}"
-    model = RNaDDreamer(
+    model = DreamerActorCritic(
         config=config,
         dreamer_model= world_model
     )

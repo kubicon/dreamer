@@ -31,9 +31,13 @@ class PredictionStepWithLegal():
 
 
 @chex.dataclass(frozen=True)
-class RNaDTimeStep():
+class ActorCriticTimeStep():
   
-  obs: chex.Array = () # [..., Player, iset_dim] for multi agent or [..., obs_dim] for single_agent
+  obs: chex.Array = () # [..., Player, iset_dim] for IIGs 
+                      #or [..., Player, num_classes * num_categoricals + hidden_state_size otherwise + num_players]
+                      # For each player, a one hot encoding of the player index is also appended
+                      # to the model state. Otherwise it would be impossible to return distinct policies 
+                      # for multiple players playing at the given state.
   legal: chex.Array = () # [..., Player, A] Legal actions in the given state
   
   action: chex.Array = () # [..., Player, A] action sampled at the given state
@@ -57,6 +61,15 @@ class TimeStep():
 
 
 
+
+@chex.dataclass(frozen=True)
+class BufferConfig:
+  trajectory_seed: int
+  buffer_sample_seed:int
+  buffer_size: int
+  on_policy: bool
+  replay_ratio: int = -1 #How many steps should be collected from the replay buffer per
+                          # online collected env step 
 
 @chex.dataclass(frozen=True)
 class RNaDConfig:
@@ -140,14 +153,13 @@ class DreamerConfig():
 class DreamerMAConfig():
   batch_size: int
   seed: int
+  rng_seed: int
 
 
-  hidden_state_size: int #Size of the RNN hidden state
   encoded_classes: int # Number of classes for each categorical distribution in state
   encoded_categories: int # Number of categorical distributions in state
 
-  learning_rate: float
-  rng_seed: int
+  learning_rate: float = 3e-4
 
 
 
@@ -156,16 +168,54 @@ class DreamerMAConfig():
   beta_dynamics: float = 1
   beta_representation: float = 0.1
 
-  free_bits_clip_threshold: float = 1 #Threshold for loss clip in free bits. 
+  free_bits_clip_threshold: float = 1 #Threshold for loss clip in free bits.
+  uniform_mix: float = 0.01 # Amount of uniform mixture added to the 
+                            # network produced categoricals. 
   
   bin_range: int = 20 #Number of the exponentially spaced bins for certain predictions such as reward in one direction, bins will be spaced out as symexp([-bin_range, ..., bin_range])
   
+  sequential_network_details: tuple[int, int, int] = (256, 64, 1) # Ordered as size of hidden state, number of features for the MLP processing, number of layers in the MLP processing
   # Ordered as (hidden_layer_features, num_hidden_layers)
   encoder_network_details: tuple[int, int] = (256, 1)
   decoder_network_details: tuple[int, int] = (256, 1)
   dynamics_network_details: tuple[int, int] = (256, 1)
   predictor_network_details: tuple[int, int] = (256, 1)
   legal_actions_network_details: tuple[int, int] = (256, 1)
+
+@chex.dataclass(frozen=True)
+class ActorCriticConfig():
+  seed: int
+  network_seed: int
+  batch_size: int
+
+  learning_rate: float = 3e-4
+  # The EMA coefficient for update
+  # of the target network parameters
+  # is 1 - this value
+  target_network_update: float = 1e-3
+
+  beta_imagination: float = 1.0
+  beta_real: float = 0.3 # Coeficients for the loss parts. Beta imagination is used for Dreamer
+                          # unrolled trajectories and beta real for trajectories from the real environment
+  eta:float = 3e-4  #Coefficient for the entropy exploration bonus
+  gamma: float = 0.997 # Gamma for TD-learning
+  td_lambda: float = 0.95 # Lambda for TD-learning
+
+  upper_percentile: float = 95
+  lower_percentile: float = 5 #Percentiles for the return normalization range
+  range_ema_coeff: float = 0.99 # Coeeficient for the EMA update of retun normalization range
+
+  #Ordered as hidden layer size, num hidden layers
+  actor_network_details: Tuple[int, int] = (256, 1)
+  critic_network_details: Tuple[int, int] = (256, 1)
+  
+  state_sample_threshold: float = 0.05 #A threshold when sampling states. The outcomes for
+                                        #each categorical below this threshold are ignored (or, specificaly a minimum
+                                        # of this threshold and the lowest of max probability outcomes of the categoricals). 
+  terminal_threshold:float =  0.5 #Thresholds when to consider the state terminal, or the actions
+  legal_threshold: float = 0.5    # Legal, when we take the sigmoid over the Dreamer produced logits.
+  bin_range: int = 20 #Number of the exponentially spaced bins for the value categorical distribution prediction
+
 
 
 
@@ -197,11 +247,51 @@ def legal_log_policy(logit: chex.Array, legal: chex.Array):
   Assumes that these have actions in the last
   dimension and the same shape."""
   chex.assert_equal_shape([logit, legal])
-  policy = legal_policy(logit, legal)
-  #The where instead of * legal
-  # is because -inf * 0 would produce NaN
-  log_policy = jnp.where(legal, jnp.log(policy), 0)
-  return log_policy
+  shifted_logit = logit - logit.max(axis=-1, keepdims=True)
+  exp_logit = jnp.exp(shifted_logit)
+  masked_exp_logit = exp_logit * legal
+  
+  normalization = jnp.sum(masked_exp_logit, axis=-1, keepdims=True)
+  log_policy = shifted_logit - jnp.log(normalization + (normalization == 0))
+  legal_log_policy = log_policy * legal
+  return legal_log_policy
+
+def policy_ratio(pi: chex.Array, mu: chex.Array, actions_oh: chex.Array, valid: chex.Array) -> chex.Array: 
+  pi_actions_prob = jnp.sum(pi * actions_oh, axis=-1, keepdims=True) * valid + (1 - valid)
+  mu_actions_prob = jnp.sum(mu * actions_oh, axis=-1, keepdims=True) * valid + (1 - valid)
+  
+  return pi_actions_prob / mu_actions_prob
+  
+def tree_where(pred: chex.Array, x: chex.ArrayTree, y: chex.ArrayTree) -> chex.ArrayTree:
+  
+  def _where(x, y):
+    return jnp.where(pred, x, y).astype(x.dtype)
+  
+  return jax.tree.map(_where, x, y)
+
+def tree_index(x: chex.ArrayTree, indices: chex.Array, axis=-1) -> chex.ArrayTree:
+  """Selects indices specified by a one dimensional index array
+  in all elements of the tree along the specified axis. If indices
+  are not one-dimensional they are flattened first."""
+  indices = indices.ravel()
+  def _select(x):
+    expanded_indices_shape = [1, ] * x.ndim
+    expanded_indices_shape[axis] = indices.shape[0]
+    item_indices = jnp.reshape(indices, expanded_indices_shape)
+    return jnp.take_along_axis(x, item_indices, axis=axis)
+  return jax.tree.map(_select, x)
+  
+def apply_force_with_threshold(decision_outputs: chex.Array, force: chex.Array,
+                               threshold: float,
+                               threshold_center: chex.Array) -> chex.Array:
+  """Apply the force with below a given threshold."""
+  chex.assert_equal_shape((decision_outputs, force, threshold_center))
+  can_decrease = decision_outputs - threshold_center > -threshold
+  can_increase = decision_outputs - threshold_center < threshold
+  force_negative = jnp.minimum(force, 0.0)
+  force_positive = jnp.maximum(force, 0.0)
+  clipped_force = can_decrease * force_negative + can_increase * force_positive
+  return decision_outputs * jax.lax.stop_gradient(clipped_force)
 
 
 def get_loss_mean_with_mask(loss: chex.Array, mask: chex.Array) -> chex.Array:
@@ -236,7 +326,7 @@ def get_percentiles_with_mask(data: chex.Array, mask:chex.Array, percentile: che
   new_percentile = scale_factor * percentile
   return jnp.percentile(masked_data, new_percentile)
   
-def get_reference_policy(game_state: GameState, legal_actions: chex.Array):
+def get_reference_policy(obs: chex.Array, legal_actions: chex.Array):
   """Returns the reference sampling policy. For now returns just a uniform policy.
   TODO: This is just for the basic testing, change this function"""
   return legal_actions / legal_actions.sum(axis=-1, keepdims=True)

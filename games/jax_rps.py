@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import numpy as np
 
 import functools
-from games.jax_game import JaxGame, GameState
+from games.jax_game import JaxGame, GameState, InformationType
 
 
 @chex.dataclass(frozen=True)
@@ -27,6 +27,9 @@ class JaxRPS(JaxGame):
   
   def params_dict(self):
     return {}
+  
+  def information_type(self):
+    return InformationType.IIG
   
   def num_players(self):
     return 2
@@ -120,6 +123,9 @@ class JaxStochasticRPS(JaxGame):
   
   def num_players(self):
     return 2
+  
+  def information_type(self):
+    return InformationType.IIG
 
   def state_tensor_shape(self):
     return self.information_state_tensor_shape() - 2

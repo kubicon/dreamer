@@ -1,6 +1,45 @@
 
 from argparse import ArgumentParser
 
+def add_actor_critic_arguments(parser: ArgumentParser, joint_train: bool = False) -> ArgumentParser:
+  """Adds actor-critic required parameters to parser."""
+  diff_string = "ac_" if joint_train else ""
+  
+  parser.add_argument(f"--{diff_string}trajectory_seed", type=int, default=-1, help="Random seed for trajectory generation")
+  parser.add_argument(f"--{diff_string}network_seed", type=int, default=-1, help="Random seed for network initialization")
+  parser.add_argument(f"--{diff_string}learning_rate", type=float, default=3e-4, help="Learning rate for the optimizer")
+  parser.add_argument(f"--{diff_string}batch_size", default=32, help="Batch size of the sampled imagination trajectories.")
+  parser.add_argument(f"--target_network_update", type=float, default=1e-3, help="1 - EMA coefficient for target network update")
+
+
+  parser.add_argument(f"--beta_imagination", type=float, default=1.0, help="Coefficient for loss on Dreamer imagined trajectories")
+  parser.add_argument(f"--beta_real", type=float, default=0.3, help="Coefficient for loss on real environment trajectories")
+
+  parser.add_argument(f"--eta", type=float, default=3e-4, help="Coefficient for entropy exploration bonus for Reinforce")
+  parser.add_argument(f"--gamma", type=float, default=0.997, help="Discount factor for TD-learning")
+  parser.add_argument(f"--td_lambda", type=float, default=0.95, help="Lambda parameter for TD-learning")
+
+
+  parser.add_argument("--upper_percentile", type=float, default=95, help="Upper percentile for the return normalization range")
+  parser.add_argument("--lower_percentile", type=float, default=5, help="Lower percentile for the return normalization range")
+  parser.add_argument("--range_ema_coeff", type=float, default=0.99, help="Coefficient for the EMA update of return normalization range")
+
+  parser.add_argument("--state_sample_threshold", type=float, default=0.05, help="Threshold when sampling states. Outcomes below this threshold are ignored.")
+  parser.add_argument("--terminal_threshold", type=float, default=0.5, help="Threshold when to consider the state terminal.")
+  parser.add_argument("--legal_threshold", type=float, default=0.5, help="Threshold for considering actions legal.")
+  parser.add_argument(f"--{diff_string}bin_range", type=int, default=20, help="Number of the exponentially spaced bins for the value categorical distribution prediction")
+
+  parser.add_argument("--actor_hidden_size", type=int, default=256, help="Number of hidden features for the actor network.")
+  parser.add_argument("--actor_hidden_layers", type=int, default=1, help="Number of hidden layers for the actor network.")
+  parser.add_argument("--critic_hidden_size", type=int, default=256, help="Number of hidden features for the critic network.")
+  parser.add_argument("--critic_hidden_layers", type=int, default=1, help="Number of hidden layers for the critic network.")
+  if not joint_train:
+    #Complete path to restore the whole model
+    ## World model path
+    parser.add_argument("--dreamer_dir", type=str, default="trained_networks/dreamer/goofspiel_3/seed99/network_seed99", help="Path to where is the saved Dreamer trained world model") 
+    parser.add_argument("--model_restore_step", type=int, default=1000, help="Which saved step of the Dreamer world model to restore.")
+  else:
+    parser.add_argument("--ac_steps_each_step", type=int, default=1, help="How many Actor-critic steps to perform in each step of the main algorithm loop.")
 def add_dreamer_arguments(parser: ArgumentParser, multi_agent: bool = True,
                           joint_train: bool = False) ->ArgumentParser:
   """Adds all the dreamer required parameters to parser.
@@ -13,7 +52,7 @@ def add_dreamer_arguments(parser: ArgumentParser, multi_agent: bool = True,
   ##Model parameters 
   parser.add_argument("--encoded_categories", type=int, default=32, help="Number of options for each categorical distribution in the latent state.")
   parser.add_argument("--encoded_classes", type=int, default=32, help="Number of categorical distributions in the latent state")
-  parser.add_argument("--hidden_state_size", type=int, default =256, help="Size of the RNN hidden state")
+  parser.add_argument("--hidden_state_size", type=int, default =-1, help="Size of the RNN hidden state. If -1 it is set to the size of joint infoset over both player. ")
   parser.add_argument(f"--{diff_string}bin_range", type=int, default=20, help="Number of the exponentially spaced bins for certain predictions such as reward in one direction, bins will be spaced out as symexp([-bin_range, ..., bin_range])")
 
   parser.add_argument(f"--{diff_string}batch_size", type=int, default=32, help="Batch size for training")
@@ -24,14 +63,20 @@ def add_dreamer_arguments(parser: ArgumentParser, multi_agent: bool = True,
   #Replay buffer parameters
   parser.add_argument("--replay_trajectory_seed", type=int, default= -1, help="Seed for sampling trajectories out of environment in the replay buffer.")
   parser.add_argument("--replay_sample_seed", type=int, default=-1, help="Seed for sampling trajectories stored in the replay buffer.")
-  parser.add_argument("--replay_size", type=int, default=32, help="Size of the replay buffer.")
+  parser.add_argument("--buffer_size", type=int, default=32, help="Size of the replay buffer.")
+  parser.add_argument("--replay_ratio", type=int, default=-1, help="The replay ratio, which defines the amount of online steps per minibatch. Respectively, the ratio is replay_ratio / (batch_size * trajectory_len). If -1, only online trajectories are sampled")
+  parser.add_argument("--on_policy", action="store_true", help="A flag whether to use the actor policy for trajectory sampling. If not, uniform policy is used instead.")
   ## Loss function coefficients
   parser.add_argument("--beta_prediction", type=float, default=1, help="The beta coefficient for the prediction loss")
   parser.add_argument("--beta_dynamics", type=float, default=1, help="The beta coefficient for the dynamics loss")
   parser.add_argument("--beta_representation", type=float, default=0.1, help="The beta coefficient for the representation loss")
+  
   parser.add_argument("--free_bits_threshold", type=float, default=1, help="Clipping threshold for the dynamics and representation losses in free bits.")
+  parser.add_argument("--uniform_mix", type=float, default=0.01, help="Amount of uniform mixed with the network returned categoricals.")
 
   ##Network layer parameters
+  parser.add_argument("--sequential_mlp_size", type=int, default=64, help="Number of hidden features in the sequential network MLP.")
+  parser.add_argument("--sequential_mlp_layers", type=int, default=1, help="Number of hidden layers for the sequential network MLP")
   parser.add_argument("--encoder_hidden_size", type=int, default=256, help="Size of the hidden layer in the encoder network")
   parser.add_argument("--dynamics_hidden_size", type=int, default=256, help="Size of the hidden layer in the dynamics network")
   parser.add_argument("--decoder_hidden_size", type=int, default=256, help="Size of the hidden layer in the decoder network")
@@ -54,7 +99,7 @@ def add_rnad_arguments(parser: ArgumentParser, joint_train: bool =False) ->Argum
   that share name with Dreamer, have rnad_ prepended to differentiate between them.
   Also, for joint_train some training loop arguments like dreamer_path are not specified."""
   
-  diff_string = "rnad_" if joint_train else ""
+  diff_string = "ac_" if joint_train else ""
   ##RNaD parameters  
   parser.add_argument("--target_network_update", type=float, default=1e-3, help="Update rate for target network")
   parser.add_argument("--eta", type=float, default=0.2, help="Strenght of the regularization in RNaD. Used for the reward transformation and the KL regularization for V-trace.")
@@ -101,7 +146,7 @@ def add_rnad_arguments(parser: ArgumentParser, joint_train: bool =False) ->Argum
     parser.add_argument("--dreamer_dir", type=str, default="trained_networks/dreamer/goofspiel_3/seed99/network_seed99", help="Path to where is the saved Dreamer trained world model") 
     parser.add_argument("--model_restore_step", type=int, default=1000, help="Which saved step of the Dreamer world model to restore.")
   else:
-    parser.add_argument("--rnad_steps_each_step", type=int, default=1, help="How many RNaD steps to perform in each step of the main algorithm loop.")
+    parser.add_argument("--ac_steps_each_step", type=int, default=1, help="How many RNaD steps to perform in each step of the main algorithm loop.")
   return parser
 
 def prepare_experiment_parser(multi_agent: bool = True):
@@ -116,7 +161,6 @@ def prepare_experiment_parser(multi_agent: bool = True):
   parser.add_argument("--print_each", type=int, default=100, help="Print loss every N steps")
   parser.add_argument("--model_save_dir", type=str, default="", help="Directory to save the trained model")
   parser.add_argument("--saved_model_file", type=str, default="", help="File with the complete model. Used for continuing to train it.")
-  parser.add_argument("--replay_fraction", type=float, default=1.0, help="A fraction defining the ratio of real steps collection. For example: 2 means 2 steps each step, 0.5 means 1 step each two steps etc.")
   if not multi_agent:
     parser = add_dreamer_arguments(parser, multi_agent=False, joint_train=False)
     return parser
@@ -126,11 +170,18 @@ def prepare_experiment_parser(multi_agent: bool = True):
   dreamer_parser = subparsers.add_parser(name="dreamer", help="Train only the Dreamer world model.")
   dreamer_parser = add_dreamer_arguments(dreamer_parser, multi_agent=True, joint_train=False)
 
-  rnad_parser = subparsers.add_parser(name="rnad", help="Train only the RNaD algorithm on already trained Dreamer model.")
+  rnad_parser = subparsers.add_parser(name="rnad", help="Train only the RNaD algorithm on already trained world model.")
   rnad_parser = add_rnad_arguments(rnad_parser, joint_train=False)
 
-  joint_parser = subparsers.add_parser(name="joint", help="Train both algorithms jointly. First performing K Dreamer model steps and then L RNaD steps (typically L = 1).")
+  ac_parser = subparsers.add_parser(name="actor_critic", help="Train only the standard Dreamer Actor-critic on already trained world model.")
+  ac_parser = add_actor_critic_arguments(ac_parser, joint_train=False)
+
+  joint_parser = subparsers.add_parser(name="joint", help="Train both Dreamer world model and actor-critic. First performing K world model steps and then L actor-critic steps (typically L = 1).")
   joint_parser = add_dreamer_arguments(joint_parser, multi_agent=True, joint_train=True)
-  joint_parser = add_rnad_arguments(joint_parser, joint_train=True)
+  joint_parser = add_actor_critic_arguments(joint_parser, joint_train=True)
+
+  joint_rnad_parser = subparsers.add_parser(name="joint_rnad", help="Train both algorithms jointly. First performing K Dreamer model steps and then L RNaD steps (typically L = 1).")
+  joint_rnad_parser = add_dreamer_arguments(joint_rnad_parser, multi_agent=True, joint_train=True)
+  joint_rnad_parser = add_rnad_arguments(joint_rnad_parser, joint_train=True)
 
   return parser

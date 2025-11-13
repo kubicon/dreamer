@@ -4,7 +4,7 @@ import numpy as np
 import chex
 
 import functools
-from games.jax_game import JaxGame, GameState
+from games.jax_game import JaxGame, GameState, InformationType
 
 INVALID_ID = 0
 FOLD_ID = 1
@@ -85,6 +85,9 @@ class JaxLeduc(JaxGame):
   
   def params_dict(self):
     return {}
+  
+  def information_type(self):
+    return InformationType.IIG
   
   def num_players(self):
     return 2

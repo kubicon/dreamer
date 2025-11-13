@@ -83,7 +83,7 @@ def get_closest_next_ma(model: DreamerMA, hidden_state, next_deter, next_isets: 
   p1_decoded_iset = model.get_decoder(model.optimizers.p1_decoder_optimizer.model, hidden_state, next_deter)
   p2_decoded_iset = model.get_decoder(model.optimizers.p2_decoder_optimizer.model, hidden_state, next_deter)
   decoded_obs = np.stack([p1_decoded_iset, p2_decoded_iset], axis=0)
-  next_dists = np.sum((decoded_obs[None, ...] - next_isets) ** 2, axis=-(-1, -2))
+  next_dists = np.sum((decoded_obs[None, ...] - next_isets) ** 2, axis=(-1, -2))
   next_closest  = np.argmin(next_dists)
   return next_closest
 
@@ -210,7 +210,7 @@ def model_walk_test(model:Dreamer|DreamerMA,
   mistake_probs = 0
   visited = {}
   vectorized_get_obs = jax.vmap(get_both_obs, in_axes=(0), out_axes=(0))
-  model_tree_root = Node("Root", data={"type": PAST_ACTION, "action": -1}) if visualise_tree else  None
+  model_tree_root = Node("", data={"type": PAST_ACTION, "action": -1}) if visualise_tree else  None
 
   def get_stoch_from_prediction(logits: chex.Array):
     stoch_unfiltered = np.asarray(jax.nn.softmax(logits, axis=-1))
@@ -273,12 +273,11 @@ def model_walk_test(model:Dreamer|DreamerMA,
       is_chance = model.game.is_chance(next_state)
       chance_outcomes = model.game.depth_chance_valid_outcomes(depth + 1)
       if is_chance:
-        next_states, next_terminals, next_rewards, next_legals, next_probs = unroll_chance_node(model.game, next_state, chance_outcomes)
+        next_states, next_terminals, next_rewards, next_legals, next_probs = unroll_chance_node(model.game, next_state, chance_outcomes) 
 
         next_terminals = np.asarray(next_terminals)
         next_rewards = np.asarray(next_rewards)
         next_legals = np.asarray(next_legals)
-        next_obs = np.asarray(next_obs)
       else:
         next_states =jax.tree.map(lambda x: x[None, ...], next_state)
 
@@ -286,6 +285,7 @@ def model_walk_test(model:Dreamer|DreamerMA,
         next_rewards = np.asarray(next_reward)[None, ...]
         next_legals = np.asarray(next_legals)[None, ...]
       next_obs = vectorized_get_obs(next_states)
+      next_obs = np.asarray(next_obs)
       next_deters, next_probs= get_next_outcomes(model, next_stoch_state, next_hidden, next_obs, probability_eps, verbose=verbose)
       #print(f"Next deters: {next_deters}")
       for i in range(next_terminals.shape[0]):
@@ -318,13 +318,13 @@ def model_walk_test(model:Dreamer|DreamerMA,
                      action_outcome_history= action_outcome_history + f"a{a}o{i}",
                      reach_probability= reach_probability * prob,
                      outcome = j, outcome_prob=single_outcome_probs[j] / outcome_prob,
-                     create_model_node=num_deters > 1)
+                     create_model_node=True)
       #return
       #represented_next_stoch = jax.nn.softmax(model.optimizers.encoder_optimizer.model(next_hidden, real_obs), axis=-1)
       
   
   init_state, init_legals = model.game.initialize_structures()
-  init_hidden = jnp.zeros(model.config.hidden_state_size)
+  init_hidden = jnp.zeros(model.hidden_state_size)
   init_chance =  model.game.is_chance(init_state)
   if init_chance:
     chance_outcomes = model.game.depth_chance_valid_outcomes(0)
@@ -361,7 +361,7 @@ def model_walk_test(model:Dreamer|DreamerMA,
                          parent= outcome_parent,
                          data = {"prob": outcome_prob, "type": PAST_CHANCE})
         outcome_parent = init_chance
-      num_init_deters = len(init_deters)
+      #num_init_deters = len(init_deters)
       for j, deter in enumerate(init_deters):
         init_carry = WalkCarry(legals= next_legal,
                               game_state = next_state,
@@ -375,7 +375,7 @@ def model_walk_test(model:Dreamer|DreamerMA,
                    action_outcome_history=f"o{i}",
                    subtree_parent = outcome_parent,
                      outcome = j, outcome_prob=init_probs[j] / outcome_prob,
-                     create_model_node=num_init_deters > 1)
+                     create_model_node=True)
     num_visited_states = len(visited)
     avg_mistake_probs = mistake_probs / num_visited_states
     avg_mistake_probs = np.minimum(avg_mistake_probs, 1.0)
@@ -389,7 +389,7 @@ def model_walk_test(model:Dreamer|DreamerMA,
   init_deters, init_probs = get_next_outcomes(model, init_stoch_state, init_hidden, init_obs, probability_eps, verbose)
   init_deters = init_deters[0]
   init_probs = init_probs[0]
-  num_init_deters = len(init_deters)
+  #num_init_deters = len(init_deters)
   for i, deter in enumerate(init_deters):
     init_carry = WalkCarry(legals= init_legals,
                               game_state = init_state,
@@ -403,11 +403,11 @@ def model_walk_test(model:Dreamer|DreamerMA,
     _tree_walk(init_carry, subtree_parent = model_tree_root,  
                     reach_probability=prob,
                      outcome = i, outcome_prob=init_probs[i],
-                     create_model_node=num_init_deters > 1)
+                     create_model_node=True)
   num_visited_states = len(visited)
   avg_mistake_probs = mistake_probs / num_visited_states
   avg_mistake_probs = np.minimum(avg_mistake_probs, 1.0)
   if visualise_tree:
     render_tree(model_tree_root, model)
-  return mistake_probs
+  return avg_mistake_probs
 

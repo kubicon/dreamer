@@ -1,98 +1,174 @@
-
 import jax
-import jax.numpy as jnp
-import jax.lax as lax
-
-import flax.nnx as nnx
-import chex
-
 import numpy as np
-import os
-
+import jax.numpy as jnp
+import chex
+import flax.nnx as nnx
 
 from functools import partial
 
+
+from games.jax_game import InformationType
+
 from dreamer_ma import DreamerMA
+from distributions import sample_categorical, get_bin_log_prob
 from networks import *
 from train_utils import *
-from rnad_dreamer import EntropySchedule, neurd_loss, v_trace
-from distributions import sample_categorical, get_bin_log_prob
+from typing import Any
+
+#jax.config.update("jax_debug_nans", True)
 
 
-
-def neurd_loss_with_range(
-  logits: chex.Array,
+def reinforce_loss_with_range(
+  log_pi: chex.Array,
   policy: chex.Array,
   q_values: chex.Array, 
   legal: chex.Array,
-  importance_sampling: chex.Array,
   return_range: chex.Array
 ):
-  """A version of NeuRD loss that does not do any thresholding
-  or clipping like standard NeuRD, but instead normalizes by the
-  range obtained as from exponential moving average of 
-  highest return differences, as described in https://arxiv.org/pdf/2301.04104 page 6."""
+  """Compute the Reinforce estimator score. Multiply this by -1 to get loss.
+  Expects the estimates to already have the entropy bonus accounted for"""
   advantage = q_values - jnp.sum(policy * q_values, axis=-1, keepdims=True)
-  advantage = advantage * importance_sampling
   advantage = jax.lax.stop_gradient(advantage / jnp.maximum(1, return_range))
 
   
-  neurd_loss_value = jnp.sum(legal * logits * advantage, axis=-1, keepdims=True)
+  neurd_loss_value = jnp.sum(legal * log_pi * advantage, axis=-1, keepdims=True)
   
+  #jax.debug.breakpoint()
+
   return neurd_loss_value
 
+def td_estimate(
+  v: chex.Array,
+  valid: chex.Array,
+  action_oh: chex.Array,
+  log_sampling_policy: chex.Array,
+  reward: chex.Array, # Still not regularized
+  lambda_: float = 1.0, # Lambda parameter for V-trace
+  entropy_eta: float = 0.2, # Regularization factor for the additional entropy regularization
+  gamma: float = 1.0 # Discount factor
+):
+  """Computes the TD-lambda estimate of the return. Only for the on-policy case.
+  (This implementation is esentially V-trace in RNaD without the importance sampling).
+  This is designed to work over the entire trajectory without bootstrapping"""
+  
+  
+  
+  #[Trajectory, Batch, Player]
+  regularization_entropy = -entropy_eta * jnp.sum(log_sampling_policy, axis=-1)
+  
+  #[Trajectory, Batch]
+  # The MinMaxEnt objective
+  both_player_entropy = (regularization_entropy[..., 0]  - regularization_entropy[..., 1])
 
-class RNaDDreamerJoint():
-  """A version of RNaDDreamer that performs joint training steps
-  Eg. it sends the signal back to the Dreamer model."""
-  def __init__(self, dreamer_model: DreamerMA, config: RNaDConfig) -> None:
+  #[Trajectory, Batch]
+  entropy_reward = reward + both_player_entropy
+  #[Trajectory, Batch, Player, 1]
+  entropy_reward = jnp.expand_dims(jnp.stack((entropy_reward, -entropy_reward), axis=-1), -1)
+  
+  #[Trajectory, Batch, Player]
+  q_reward = jnp.stack((reward, -reward), axis=-1) + regularization_entropy[..., (0, 1)]
+  
+  q_reward = jnp.expand_dims(q_reward, -1)
+  
+  
+  
+  @chex.dataclass(frozen=True)
+  class TDCarry: 
+    next_value: chex.Array # Network value in the next timestep 
+    delta_v: chex.Array # Propagated delta V in TD-lambda from the next timestep
+  
+  
+  init_carry = TDCarry(
+    next_value=jnp.zeros_like(v[-1]),
+    delta_v=jnp.zeros_like(v[-1])
+  )
+
+  def _v_trace(carry: TDCarry, x) -> tuple[TDCarry, Any]:
+    (v, q_reward, entropy_reward,valid, action_oh) = x 
+    # reward_uncorrected = reward + gamma * carry.reward_uncorrected + entropy
+    # discounted_reward = reward + gamma * carry.reward
     
+    delta_v = (entropy_reward + gamma * carry.next_value - v)
+    carry_delta_v = delta_v + lambda_ * gamma * carry.delta_v
+    
+    v_target = v + carry_delta_v
+    
+    
+    q_value = v + action_oh *  (q_reward + gamma * (carry.next_value + carry.delta_v) - v )
+    
+    next_carry = TDCarry(
+      next_value=v,
+      delta_v=carry_delta_v
+    )
+    reset_carry = init_carry
+  
+    reset_v_target = jnp.zeros_like(v_target)
+    reset_q_value = jnp.zeros_like(q_value) 
+    
+    reset_carry = init_carry
+    return tree_where(valid, (next_carry, (v_target, q_value)), (reset_carry, (reset_v_target, reset_q_value)))
+
+  _, (v_target, q_value) = jax.lax.scan(
+    f=_v_trace,
+    init=init_carry,
+    xs=(v, q_reward, entropy_reward, valid, action_oh),
+    reverse=True
+  )
+  return v_target, q_value
+
+class DreamerActorCritic():
+  
+  def __init__(self, config: ActorCriticConfig, world_model: DreamerMA):
+    """A class that has the standard Dreamer
+    actor-critic, as described in https://arxiv.org/pdf/2301.04104"""
     self.config = config
-    self.world_model = dreamer_model
+    self.world_model = world_model
+    self.key = jax.random.key(self.config.seed)
     self.init()
 
   def init(self):
 
     self.actions = self.world_model.action_dimension
-    #Unlike Dreamer, we operate with rewards defined 
+    #Unlike world model, we operate with rewards defined 
     # as (state, action, next_state) and only care how to
     # act in non-terminal states, hence we end one turn before terminal
     self.non_chance_trajectory_max = self.world_model.non_chance_trajectory_max - 1
     self.num_players = self.world_model.game.num_players()
+    self.iset_size = self.world_model.game.information_state_tensor_shape()
+
+    # Use iset for IIGs use iset, otherwise use the model state [deterministic_state, hidden_state]
+    self.use_iset = self.world_model.game.information_type() == InformationType.IIG
 
     self.example_hidden = jnp.zeros(self.world_model.hidden_state_size)
     self.example_categorical = jnp.zeros((self.world_model.config.encoded_classes, self.world_model.config.encoded_categories))
     
     self.rng_key = jax.random.key(self.config.seed)
-    self.nnx_rngs = nnx.Rngs(jax.random.key(self.config.network_seed))
+    rngs = nnx.Rngs(jax.random.key(self.config.network_seed))
 
-    self.iset_size = self.world_model.game.information_state_tensor_shape()
     
     
     self.example_timestep = self.default_timestep()
-    
-    self._entropy_schedule = EntropySchedule(
-        sizes=self.config.entropy_schedule_size,
-        repeats=self.config.entropy_schedule_repeats)
-    
-    self.prev_network = RNaDNetwork(self.iset_size, self.actions, self.config.bin_range, self.config.rnad_network_details[0], self.config.rnad_network_details[1], rngs=self.nnx_rngs)
-    self._prev_network = RNaDNetwork(self.iset_size, self.actions, self.config.bin_range, self.config.rnad_network_details[0], self.config.rnad_network_details[1], rngs=self.nnx_rngs)
-    
     self.return_range = jnp.array(0)
 
-    self.optimizers = initialize_rnad_optimizers(self.config, self.iset_size, self.actions, self.nnx_rngs)
-    self.cached_step = nnx.cached_partial(self._jit_step_with_model, self.optimizers, self.world_model.optimizers, self.prev_network, self._prev_network)
+    self.optimizers = initialize_actor_critic_optimizers(self.config, self.input_features, self.actions, rngs)
+    self.cached_step = nnx.cached_partial(self._jit_step_with_model, self.optimizers, self.world_model.optimizers)
     self.learner_steps = 0
     self.policy_switch_steps = 0
   
   
   def default_timestep(self):
-    obs = np.zeros(self.iset_size, dtype=np.float32)
-    
+    if self.use_iset:
+      obs = np.zeros(self.iset_size, dtype=np.float32)
+      self.input_features = self.iset_size
+    else:
+      model_state_features = self.world_model.config.encoded_classes * self.world_model.config.encoded_categories + self.world_model.hidden_state_size + self.num_players
+      obs = np.zeros(model_state_features, dtype=np.float32)
+      self.input_features = model_state_features
+
     legal = np.ones((1, self.actions), dtype=np.int8)
     action = np.ones((1, self.actions), dtype=np.float32)
     policy = np.ones((1,self.actions), dtype=np.float32)
-    valid = np.array(0, dtype=np.float32)
+    valid = np.array(0, dtype=np.bool)
     reward = np.array(0, dtype=np.float32)
     
     ts = ActorCriticTimeStep(
@@ -104,6 +180,7 @@ class RNaDDreamerJoint():
       reward = reward
     )
     return ts
+    
   
   @partial(nnx.jit, static_argnums=(0,))
   def get_v_from_dist(self, v_dist_logits):
@@ -124,22 +201,28 @@ class RNaDDreamerJoint():
     v = symexp(v)
     return v
   
+  
+   
   @partial(nnx.jit, static_argnums=(0,))
-  def _jit_get_network(self, network: RNaDNetwork, obs, legal):
-    pi, v_dist_logits, log_pi, logits = network(obs, legal)
-    return pi, v_dist_logits, log_pi, logits
+  def _jit_get_actor(self, actor_network: ActorNetwork, input, legal) -> chex.Array:
+    return actor_network(input, legal)
   
   @partial(nnx.jit, static_argnums=(0,))
-  def _jit_get_actor_critic(self, network: RNaDNetwork, obs, legal):
-    """Same as get network, but also reads out the v value
-    from the categorical distribution"""
-    pi, v_dist_logits, log_pi, logits = self._jit_get_network(network, obs, legal)
+  def _jit_get_critic(self, critic_network: CriticNetwork, input) ->chex.Array:
+    return critic_network(input)
+  
+  @partial(nnx.jit, static_argnums=(0,))
+  def _jit_get_policy(self, actor_network: ActorNetwork, input, legal) -> chex.Array:
+    return actor_network(input, legal)[0]
+  
+  @partial(nnx.jit, static_argnums=(0,))
+  def _jit_get_actor_critic(self, actor_network: ActorNetwork, critic_network: CriticNetwork, input, legal):
+    """Gets the predictions from both actor and critic networks
+    and also reads out the value predicted by critic from the distribution."""
+    pi, log_pi, logits = self._jit_get_actor(actor_network, input, legal)
+    v_dist_logits = self._jit_get_critic(critic_network, input)
     v = self.get_v_from_dist(v_dist_logits)
     return pi, v, log_pi, logits
-  
-  @partial(nnx.jit, static_argnums=(0,))
-  def _jit_get_policy(self, network: RNaDNetwork, obs, legal) -> chex.Array:
-    return network(obs, legal)[0]
   
   # TODO: Be careful, this sometimes produces an action that is illegal
   @partial(nnx.jit, static_argnums=(0,))
@@ -169,6 +252,22 @@ class RNaDDreamerJoint():
     players_get_policy = nnx.vmap(self._jit_get_policy, in_axes=(None, 0, 0), out_axes=(0))
     pi = players_get_policy(network, joint_obs, joint_legal)
     return pi
+  
+  @partial(nnx.jit, static_argnums=0)
+  def get_obs(self, p1_decoder:IsetDecoder, p2_decoder: IsetDecoder, hidden_state: chex.Array, deter_state:chex.Array):
+    if self.use_iset:
+      #TODO: For now, iset decoder is used to create trajectories 
+      # trained on the "original" isets. This might be changed later
+      p1_iset = p1_decoder(hidden_state, deter_state)
+      p2_iset = p2_decoder(hidden_state, deter_state)
+      obs = jnp.stack([p1_iset, p2_iset], axis=0)
+      return obs
+    flat_deter = deter_state.reshape((deter_state.shape[:-2], -1))
+    players_oh = jnp.eye(self.num_players)
+    players_oh = jnp.reshape(players_oh, (1, ) * (flat_deter.ndim - 1) + players_oh.shape)
+    model_state = jnp.concatenate([hidden_state, flat_deter], axis=-1)
+    player_model_state = jnp.concatenate([jnp.stack([model_state, model_state], axis=-2), players_oh], axis=-1)
+    return player_model_state
   
   #TODO: Is it necessary to pass all the models explicitly like this?
   @partial(nnx.jit, static_argnums=0)
@@ -210,6 +309,7 @@ class RNaDDreamerJoint():
       action = jax.random.choice(key, self.actions, p=p)
       action_oh = jax.nn.one_hot(action, self.actions)
       return action, action_oh
+    
 
     vectorized_sample_action = nnx.vmap(choice_wrapper, in_axes=(0, 0), out_axes=0)
 
@@ -218,24 +318,17 @@ class RNaDDreamerJoint():
                         predictor: Predictor, legal_network: LegalActionsNetwork, p1_iset_decoder:IsetDecoder,
                         p2_iset_decoder: IsetDecoder) -> tuple[SampleTrajectoryCarry, chex.Array]:
       
-      #TODO: For now, iset decoder is used to create trajectories 
-      # trained on the "original" isets. This might be changed later
-      p1_iset = p1_iset_decoder(carry.hidden_state, carry.deter_state)
-      p2_iset = p2_iset_decoder(carry.hidden_state, carry.deter_state)
-      obs = jnp.stack([p1_iset, p2_iset], axis=0)
-
+      
+      obs = self.get_obs(p1_iset_decoder, p2_iset_decoder, carry.hidden_state, carry.deter_state)
       #get policy 
       pi = self.get_policy_both(rnad_network, obs, carry.legal_actions)
       #uniform mix to the policy
       normalization = jnp.sum(carry.legal_actions, axis=-1, keepdims=True)
-      uniform_pi = carry.legal_actions / (normalization + (normalization == 0))
-      pi = self.config.sampling_epsilon * uniform_pi + (1 - self.config.sampling_epsilon) * pi
       # For each player samples a single action
       
       action_sample_key, state_sample_key = jax.random.split(key)
       action_sample_keys = jax.random.split(action_sample_key, self.num_players)
       action, action_oh = vectorized_sample_action(action_sample_keys, pi)
-      
       
       next_hidden = sequence_model(carry.hidden_state, carry.deter_state, action_oh)
       next_stoch = dynamics(next_hidden)
@@ -262,7 +355,7 @@ class RNaDDreamerJoint():
         terminal = jnp.logical_or(next_terminal, jnp.logical_not(valid)),
       )
          
-      timestep = jax.tree.map(lambda t, f: jnp.where(valid, t, f).astype(t.dtype), timestep, self.example_timestep)
+      timestep = tree_where(valid, timestep, self.example_timestep)
       return new_carry, timestep
     _, timestep = _sample_trajectory(init_carry, trajectory_key, rnad_network, sequence_model, dynamics, predictor, legal_network, p1_iset_decoder, p2_iset_decoder)
     #[Trajectory, ...]
@@ -284,90 +377,101 @@ class RNaDDreamerJoint():
     return keys
   
 
+  @partial(nnx.jit, static_argnums=0)
+  def dreamer_timestep_to_timestep(self, dreamer_timestep: TimeStep, dreamer_prediction_step: PredictionStepWithLegal) ->ActorCriticTimeStep:
+    #Do not forget that the Dreamer timestep rewards and terminal
+    # are w.r.t. the current state. We want
+    # reward for playing an action in the current state, not for getting to it
+    # so, they are shifted by 1 forward in time
+    # compared to our desired RNaD timesteps.
+    # We also do not want the last step, since that is always a terminal state
+    legal = dreamer_timestep.legal[:-1]
+    action = dreamer_timestep.action[:-1]
+    policy = dreamer_timestep.policy[:-1]
+    reward = dreamer_timestep.reward[1:]
+    valid = jnp.logical_and(~dreamer_timestep.terminal[:-1], dreamer_timestep.valid[:-1])
+    
+    #if we shouldnt use infosets we replace obs
+    # with the predicted model states
+    if self.use_iset:
+      obs = dreamer_timestep.obs[:-1]
+    else:
+      #These are sampled from the encoder produced stochastic states
+      flat_deters = jnp.reshape(dreamer_prediction_step.deter_state, (*dreamer_prediction_step.deter_state.shape[-2], -1))  
+      players_oh = jnp.eye(self.num_players)
+      players_oh = jnp.reshape(players_oh, (1, ) * (flat_deters.ndim - 1) + players_oh.shape)
+      model_states = jnp.concatenate([dreamer_prediction_step.hidden_state, flat_deters], axis=-1)
+      player_model_states = jnp.concatenate([jnp.stack([model_states, model_states], axis=-2), players_oh], axis=-1)
+      obs = player_model_states
+    ac_timestep = ActorCriticTimeStep(obs = obs,
+                                      legal=legal,
+                                      action=action,
+                                      policy = policy,
+                                      reward = reward,
+                                      valid=valid)
+    return ac_timestep
+
 
   @partial(nnx.jit, static_argnums=(0,))
   def update_parameters_and_model(
     self,
-    optimizers: RNaDOptimizers,
+    optimizers: ActorCriticOptimizers,
     world_model_optimizers: DreamerMAOptimizers,
-    prev_network: RNaDNetwork,
-    _prev_network: RNaDNetwork,
-    trajectory_key,
+    trajectory_key: chex.Array,
     dreamer_timestep: TimeStep,
     dreamer_prediction_step: PredictionStepWithLegal,
     return_range: chex.Array,
-    alpha,
-    update_net 
   ):
     """Compute RNaD loss and use it to perform
     a gradient step of both RNaD and Dreamer."""
 
-    def rnad_loss(
+    def actor_critic_loss(
       timestep: ActorCriticTimeStep,
-      rnad_network: RNaDNetwork,
-      target_network: RNaDNetwork,
-      prev_network: RNaDNetwork,
-      _prev_network: RNaDNetwork,
-      start_reaches_is: chex.Array,
+      actor_network: ActorNetwork,
+      critic_network: CriticNetwork,
+      target_network: CriticNetwork,
       return_range: chex.Array,
-      alpha: float,
     ):
       
       bins = jnp.arange((2 * self.config.bin_range) + 1) - self.config.bin_range
       # Per player vmap
-      per_player_net_apply = nnx.vmap(self._jit_get_network, in_axes=(None, 0, 0), out_axes=(0))
+      per_player_actor_apply = nnx.vmap(self._jit_get_actor, in_axes=(None, 0, 0), out_axes=(0))
+      per_player_critic_apply = nnx.vmap(self._jit_get_critic, in_axes=(None, 0), out_axes=(0))
       #Per trajectory and batch dimensions
-      vectorized_net_apply = nnx.vmap(nnx.vmap(per_player_net_apply, in_axes=(None, 0, 0), out_axes=(0)), in_axes=(None, 0, 0), out_axes=(0))
-      pi, v_dist_logits, log_pi, logit = vectorized_net_apply(rnad_network, timestep.obs, timestep.legal)
+      vectorized_actor_apply = nnx.vmap(nnx.vmap(per_player_actor_apply, in_axes=(None, 0, 0), out_axes=(0)), in_axes=(None, 0, 0), out_axes=(0))
+      vectorized_critic_apply = nnx.vmap(nnx.vmap(per_player_critic_apply, in_axes=(None, 0), out_axes=(0)), in_axes=(None, 0), out_axes=(0))
 
-      _, v_target_dist_logits, _, _ = vectorized_net_apply(target_network, timestep.obs, timestep.legal)
-      _, _, log_pi_prev, _ = vectorized_net_apply(prev_network, timestep.obs, timestep.legal)
-      _, _, log_pi_prev_, _ = vectorized_net_apply(_prev_network, timestep.obs, timestep.legal)
+      pi, log_pi, logit = vectorized_actor_apply(actor_network, timestep.obs, timestep.legal)
+
+      v_dist_logits = vectorized_critic_apply(critic_network, timestep.obs)
+
+      v_target_dist_logits = vectorized_critic_apply(target_network, timestep.obs)
        
       v_target = self.get_v_from_dist(v_target_dist_logits)
-      # This creates the regularization term for rewards
-      regularized_term = log_pi - (alpha * log_pi_prev + (1 - alpha) * log_pi_prev_) 
       
       expanded_valid = jnp.expand_dims(timestep.valid, (-1, -2))
       
-      v_train_target, q_value = v_trace(v_target, expanded_valid, timestep.policy, pi, regularized_term, timestep.action, timestep.reward,
-                                        self.config.lambda_vtrace, self.config.c_vtrace, self.config.rho_vtrace,
-                                        self.config.eta, self.config.vtrace_eta, self.config.gamma_vtrace)
+      v_train_target, q_value = td_estimate(v_target, expanded_valid, timestep.policy, timestep.action, timestep.reward,
+                                        self.config.td_lambda, self.config.eta, self.config.gamma)
       
       q_mask = expanded_valid * timestep.legal
-      percentiles = get_percentiles_with_mask(q_value, q_mask, jnp.array([95, 5]))
+      percentiles = get_percentiles_with_mask(q_value, q_mask, jnp.array([self.config.upper_percentile, self.config.lower_percentile]))
       current_range = (percentiles[0] - percentiles[1])
-      new_range = 0.01 * current_range + 0.99 * return_range
+      new_range = (1 - self.config.range_ema_coeff) * current_range + self.config.range_ema_coeff * return_range
       #v_train_target, q_value = jnp.zeros_like(v), jnp.zeros_like(pi)
-      # We multiply by 2, since each player acts
-      #v_loss = jnp.sum((expanded_valid * (v - lax.stop_gradient(v_train_target)) ** 2)) / (normalization + (normalization == 0))
       v_loss = -get_bin_log_prob(v_dist_logits, bins, jax.lax.stop_gradient(v_train_target))
-      v_loss_value = get_loss_mean_with_mask(v_loss, expanded_valid)
-
-      # Each Q is multiplied by product of importance_sampling of opponent and inverted sampling policy by the acting player.
-      # This computes counterfactual importance sampling
-      sampling_policy = jnp.sum(timestep.policy * timestep.action, axis=-1, keepdims=True) * expanded_valid + (1 - expanded_valid)
-      network_policy = jnp.sum(pi * timestep.action, axis=-1, keepdims=True)* expanded_valid + (1 - expanded_valid)
+      v_loss_value = get_loss_mean_with_mask(v_loss, expanded_valid)    
       
-      # We do not take into account the player reaches, since infoset is always reached with the same prob
-      sampling_policy = jnp.prod(sampling_policy, axis=-2, keepdims=True)
-      
-      importance_sampling = network_policy / sampling_policy
-      
-      importance_sampling = jnp.concatenate((start_reaches_is, importance_sampling[:-1]), axis=0)
-      importance_sampling = jnp.cumprod(importance_sampling, axis=0)
-      importance_sampling = jnp.flip(importance_sampling, axis=-2)
-      
-      
-      loss_neurd = neurd_loss_with_range(logit, pi, q_value, timestep.legal, importance_sampling, new_range)
+      loss_reinforce = reinforce_loss_with_range(log_pi, pi, q_value, timestep.legal, new_range)
       
       # The multiplication by -1 is critical here, otherwise we would
       # be minimizing the neurd term, but we want to maximize it.
-      neurd_loss_value = -get_loss_mean_with_mask(loss_neurd, expanded_valid)
-      #jax.debug.breakpoint()
-      return v_loss_value + neurd_loss_value, new_range
+      reinforce_loss_value = -get_loss_mean_with_mask(loss_reinforce, expanded_valid)
 
-    def imagination_loss(rnad_network: RNaDNetwork,
+      return v_loss_value + reinforce_loss_value, new_range
+
+    def imagination_loss(actor_network: ActorNetwork,
+      critic_network: CriticNetwork,
       sequence_model: SequenceModel, 
       dynamics: DynamicsPredictor,
       predictor: Predictor, 
@@ -376,15 +480,11 @@ class RNaDDreamerJoint():
       p1_iset_decoder:IsetDecoder,
       p2_iset_decoder: IsetDecoder,
       target_network: RNaDNetwork,
-      prev_network: RNaDNetwork,
-      _prev_network: RNaDNetwork,
-      trajectory_key,
+      trajectory_key: chex.Array,
       starting_points: PredictionStepWithLegal,
-      start_reaches_is: chex.Array,
       return_range: chex.Array,
-      alpha: float,
       beta_imagination: float):
-        timestep = self.sample_trajectories(trajectory_key, starting_points, rnad_network, 
+        timestep = self.sample_trajectories(trajectory_key, starting_points, actor_network, 
                                                 sequence_model,
                                                 dynamics,
                                                 predictor,
@@ -392,19 +492,16 @@ class RNaDDreamerJoint():
                                                 encoder,
                                                 p1_iset_decoder,
                                                 p2_iset_decoder)
-        loss_val, new_range = rnad_loss(timestep, rnad_network, target_network, prev_network, _prev_network, start_reaches_is, return_range, alpha) 
+        loss_val, new_range = actor_critic_loss(timestep, actor_network, critic_network, target_network, return_range) 
         return beta_imagination * loss_val, new_range
     
-    def real_loss(rnad_network: RNaDNetwork,
+    def real_loss(actor_network: ActorNetwork,
+      critic_network: CriticNetwork,
       target_network: RNaDNetwork,
-      prev_network: RNaDNetwork,
-      _prev_network: RNaDNetwork,
       timestep: ActorCriticTimeStep,
       return_range: chex.Array,
-      alpha: float,
       beta_real: float):
-        start_reaches_is = jnp.ones((1, *timestep.policy.shape[1:-1], 1))
-        loss_val, new_range = rnad_loss(timestep, rnad_network, target_network, prev_network, _prev_network, start_reaches_is, return_range, alpha)
+        loss_val, new_range = actor_critic_loss(timestep, actor_network, critic_network, target_network, return_range)
         return beta_real * loss_val, new_range
       
     starting_key, selector_key, trajectory_key = jax.random.split(trajectory_key, 3)
@@ -414,7 +511,7 @@ class RNaDDreamerJoint():
     predictions_for_imagination = tree_index(dreamer_prediction_step, traj_indices, axis=1)
     #Then select starting points in these trajectories
     starting_key = jax.random.split(starting_key, self.config.batch_size)
-    def choose_starting_point(network_pi:chex.Array, timestep: TimeStep, prediction_step: PredictionStepWithLegal, key):
+    def choose_starting_point(timestep: TimeStep, prediction_step: PredictionStepWithLegal, key):
       """Choose a starting point that is not invalid or terminal in the timestep
       uniformly. Chooses over the trajectory dimension and should be 
       vmaped over the batch dimension"""
@@ -422,35 +519,15 @@ class RNaDDreamerJoint():
       normalization = jnp.sum(validity_mask)
       p = validity_mask / (normalization + (normalization == 0))
       chosen_idx = jax.random.choice(key, p.shape[0], p = p)
-      previous_steps = jnp.arange(timestep.policy.shape[0]) < chosen_idx
-      #We also need to compute the importance sampling
-      # for the player reaches, since we do not start at
-      # the beggining of the trajectory.
-      #Shape [T, Pl, 1]
-      timestep_pi = jnp.sum(timestep.policy* timestep.action, axis=-1, keepdims=True)
-      #Shape [T, 1, 1]
-      timestep_joint_pi = jnp.prod(timestep_pi, axis=-2, keepdims=True)
-      #[T, Pl, A]
-      #[T, Pl, 1]
-      network_pi = jnp.sum(network_pi * timestep.action, axis=-1, keepdims=True)
-      masked_is = jnp.where(previous_steps[..., None, None], network_pi / timestep_joint_pi, 1)
-      #[1, Pl, 1]
-      start_reaches_is = jnp.prod(masked_is, axis=0, keepdims=True)
       sampled_start = jax.tree_util.tree_map(lambda x: jnp.take_along_axis(x, chosen_idx.reshape((1,) * x.ndim), axis=0).squeeze(0), prediction_step)
       #sampled_start = jax.tree_util.tree_map(lambda x: x[0], prediction_step)
-      return sampled_start, start_reaches_is
-    vectorized_starting_point = jax.vmap(choose_starting_point, in_axes=(1, 1,1, 0), out_axes=(0, 1))
-    per_player_net_apply = nnx.vmap(self._jit_get_network, in_axes=(None, 0, 0), out_axes=(0))
-      #Per trajectory and batch dimensions
-    vectorized_net_apply = nnx.vmap(nnx.vmap(per_player_net_apply, in_axes=(None, 0, 0), out_axes=(0)), in_axes=(None, 0, 0), out_axes=(0))
-    
-    #TODO: This will be called again in the real loss. Cannot get rid of the
-    # redundant call somehow?
-    timestep_pi, _, _, _ = vectorized_net_apply(optimizers.rnad_optimizer.model, dreamer_timestep.obs, dreamer_timestep.legal)
-    starting_points, start_reaches_is = vectorized_starting_point(jax.lax.stop_gradient(timestep_pi), timestep_for_imagination, predictions_for_imagination, starting_key)
-  
-    img_return, grad = nnx.value_and_grad(imagination_loss, argnums=(0), has_aux=True)(
-      optimizers.rnad_optimizer.model,
+      return sampled_start
+    vectorized_starting_point = jax.vmap(choose_starting_point, in_axes=(1,1, 0), out_axes=(0))
+    starting_points = vectorized_starting_point(timestep_for_imagination, predictions_for_imagination, starting_key)
+
+    img_return, grads = nnx.value_and_grad(imagination_loss, argnums=(0, 1), has_aux=True)(
+      optimizers.actor_optimizer.model,
+      optimizers.critic_optimizer.model,
       world_model_optimizers.sequence_optimizer.model,
       world_model_optimizers.dynamics_optimizer.model,
       world_model_optimizers.predictor_optimizer.model,
@@ -458,82 +535,55 @@ class RNaDDreamerJoint():
       world_model_optimizers.encoder_optimizer.model,
       world_model_optimizers.p1_decoder_optimizer.model,
       world_model_optimizers.p2_decoder_optimizer.model, 
-      optimizers.rnad_target_optimizer.model,
-      prev_network,
-      _prev_network,
-      trajectory_key, starting_points, start_reaches_is, return_range, alpha, self.config.beta_imagination)
+      optimizers.target_optimizer.model,
+      trajectory_key, 
+      starting_points,
+      return_range,
+      self.config.beta_imagination)
     
     img_loss, new_range = img_return
-    # optimizers.rnad_optimizer.update(grads[0])
-    # optimizers.sequence_optimizer.update(grads[1])
-    # optimizers.dynamics_optimizer.update(grads[2])
-    # optimizers.predictor_optimizer.update(grads[3])
-    # optimizers.legal_actions_optimizer.update(grads[4])
-    # optimizers.encoder_optimizer.update(grads[5])
-    # optimizers.p1_decoder_optimizer.update(grads[6])
-    # optimizers.p2_decoder_optimizer.update(grads[7])
-    optimizers.rnad_optimizer.update(grad)
+    optimizers.actor_optimizer.update(grads[0])
+    optimizers.critic_optimizer.update(grads[1])
 
-    #Do not forget that the Dreamer timestep rewards and terminal are shifted by 1 in time
-    # compared to our desired RNaD timesteps.
-    # We also do not want the last step, since that is always a terminal state
-    rnad_timestep = ActorCriticTimeStep(obs = dreamer_timestep.obs[:-1],
-                                 legal = dreamer_timestep.legal[:-1],
-                                 action = dreamer_timestep.action[:-1],
-                                 policy = dreamer_timestep.policy[:-1],
-                                 reward = dreamer_timestep.reward[1:],
-                                 valid = jnp.logical_and(~dreamer_timestep.terminal[:-1], dreamer_timestep.valid[:-1]))                                      
-    r_return, grad = nnx.value_and_grad(real_loss, argnums=(0), has_aux=True)(
-      optimizers.rnad_optimizer.model,
-      optimizers.rnad_target_optimizer.model,
-      prev_network,
-      _prev_network,
-      rnad_timestep,
+    ac_timestep = self.dreamer_timestep_to_timestep(dreamer_timestep, dreamer_prediction_step)             
+    r_return, grads = nnx.value_and_grad(real_loss, argnums=(0, 1), has_aux=True)(
+      optimizers.actor_optimizer.model,
+      optimizers.critic_optimizer.model,
+      optimizers.target_optimizer.model,
+      ac_timestep,
       new_range,
-      alpha,
       self.config.beta_real
     )
     r_loss, new_range = r_return
-    optimizers.rnad_optimizer.update(grad)
+    optimizers.actor_optimizer.update(grads[0])
+    optimizers.critic_optimizer.update(grads[1])
 
-    rnad_graphdef, state = nnx.split(optimizers.rnad_optimizer.model)
-    _, state_target = nnx.split(optimizers.rnad_target_optimizer.model)
-    _, state_prev = nnx.split(prev_network)
-    _, _state_prev = nnx.split(_prev_network)
+    critic_graphdef, state = nnx.split(optimizers.critic_optimizer.model)
+    _, state_target = nnx.split(optimizers.target_optimizer.model)
 
     #This grad coupled with vanilla SGD optimizer 
     # is equivalent to the EMA formula (1 - alpha) * state_target + alpha * state
     target_grad = jax.tree.map(lambda a, b: a - b, state_target, state)
-    optimizers.rnad_target_optimizer.update(target_grad)
-      
+    optimizers.target_optimizer.update(target_grad)
 
-    state_prev, _state_prev = jax.lax.cond(
-        update_net,
-        lambda: (state_target, state_prev),
-        lambda: (state_prev, _state_prev))
-    prev_network = nnx.merge(rnad_graphdef, state_prev)
-    _prev_network = nnx.merge(rnad_graphdef, _state_prev)
-    return prev_network, _prev_network, img_loss, r_loss, new_range
+    return img_loss, r_loss, new_range
   
   @partial(nnx.jit, static_argnums=(0))
-  def _jit_step_with_model(self, optimizers: RNaDOptimizers, world_model_optimizers:DreamerMAOptimizers,
-                prev_network: RNaDNetwork, _prev_network: RNaDNetwork,trajectory_key, dreamer_timestep: TimeStep, 
-                dreamer_prediction_step:PredictionStepWithLegal, return_range:chex.Array, learner_steps: int):
+  def _jit_step_with_model(self, optimizers: JointOptimizers, world_model_optimizers:DreamerMAOptimizers,
+                trajectory_key, dreamer_timestep: TimeStep, 
+                dreamer_prediction_step:PredictionStepWithLegal, return_range:chex.Array):
     #
-    
-    alpha, update_regularization = self._entropy_schedule(learner_steps)
-    prev_network, _prev_network, img_loss, r_loss, new_range = self.update_parameters_and_model(
-      optimizers, world_model_optimizers, prev_network, _prev_network, trajectory_key, dreamer_timestep, dreamer_prediction_step, return_range, alpha, update_regularization
+    img_loss, r_loss, new_range = self.update_parameters_and_model(
+      optimizers, world_model_optimizers, trajectory_key, dreamer_timestep, dreamer_prediction_step, return_range
     )
-    return prev_network, _prev_network, img_loss, r_loss, new_range, update_regularization
+    return img_loss, r_loss, new_range
 
   
   def step(self, dreamer_timestep: TimeStep, dreamer_prediction_step:PredictionStepWithLegal):
     trajectory_key = self.get_next_rng_key()
-    #self.prev_network, self._prev_network, img_loss, r_loss, update_regularization =  self._jit_step_with_model(self.optimizers, self.world_model.optimizers, self.prev_network, self._prev_network, trajectory_key, dreamer_timestep, dreamer_prediction_step, self.return_range, self.learner_steps)
-    self.prev_network, self._prev_network, img_loss, r_loss, self.return_range, update_regularization = self.cached_step(trajectory_key, dreamer_timestep, dreamer_prediction_step, self.return_range, self.learner_steps)
+    #img_loss, r_loss, self.return_range =  self._jit_step_with_model(self.optimizers, self.world_model.optimizers, trajectory_key, dreamer_timestep, dreamer_prediction_step, self.return_range)
+    img_loss, r_loss, self.return_range= self.cached_step(trajectory_key, dreamer_timestep, dreamer_prediction_step, self.return_range)
     self.learner_steps += 1
-    self.policy_switch_steps += int(update_regularization)
     return img_loss, r_loss
 
 
@@ -541,10 +591,8 @@ class RNaDDreamerJoint():
     return {"config": self.config,
             "world_model": self.world_model,
             "optimizers": nnx.state(self.optimizers),
-            "prev_network": nnx.state(self.prev_network),
-            "_prev_network": nnx.state(self._prev_network),
             "steps": self.learner_steps,
-            "trajectory_key": self.rng_key,}
+            "trajectory_key": self.rng_key}
   
   def __setstate__(self, state):
     self.config = state["config"]
@@ -560,8 +608,6 @@ class RNaDDreamerJoint():
     self.rng_key = state["trajectory_key"]
     self.learner_steps = state["steps"]
     self.optimizers = update_nnx(self.optimizers, state["optimizers"])
-    self.prev_network = update_nnx(self.prev_network, state["prev_network"])
-    self._prev_network = update_nnx(self._prev_network, state["_prev_network"])
     # #Necessary to correctly continue to train on the updated state of the optimizers
     # self.cached_step = nnx.cached_partial(self._jit_step_with_model, self.optimizers, self.prev_network, self._prev_network)
     # #Explicitly reinitialize the world model optimizers
@@ -577,5 +623,5 @@ class RNaDDreamerJoint():
 
     # self.world_model.optimizers = wm_optimizers
     #Do not forget to also reset the cached step of the world model
-    self.world_model.cached_step = nnx.cached_partial(self.world_model.world_model_train, self.world_model.optimizers) 
+    #self.world_model.cached_step = nnx.cached_partial(self.world_model.world_model_train, self.world_model.optimizers) 
   

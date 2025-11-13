@@ -6,15 +6,24 @@ import jax.numpy as jnp
 from train_utils import symlog
 import chex
 
-def sample_categorical(logits: jax.Array, key, uniform_mix: float = 0.01, sample_threshold: float = 0.0)-> jax.Array:
+def add_uniform_mix(logits: jax.Array, uniform_mix: float = 0.01):
+  """Creates a mixture between the actual logits induced distribution
+  and uniform distribution, to prevent KL losses spike early
+  as described in https://arxiv.org/pdf/2301.04104 page 5. """
+  
+  probs = jax.nn.softmax(logits, axis=-1)
+  uniform = jnp.ones_like(probs) / probs.shape[-1]
+  # Mix the probability with the uniform distribution.
+  probs = (1.0 - uniform_mix) * probs + uniform_mix * uniform
+  logits_with_uniform = jnp.log(probs)
+  return logits_with_uniform
+
+def sample_categorical(logits: jax.Array, key, sample_threshold: float = 0.0)-> jax.Array:
   """Given a PRNG key produced by split, sample from each
   of the categorical distributions logits and return the
   one-hot encoded outcome for each of the distributions.
   This function does NOT split internally,
   make sure the key passed to it is not reused.
-  Uniform_mix creates a mixture between the actual logits induced distribution
-  and uniform distribution, to prevent KL losses spike early
-  as described in https://arxiv.org/pdf/2301.04104 page 5.
   Sample threshold ensures that outcomes with probability lower than 
    this threshold are ignored (with the exception of if that would cause
    an categorical to have no valid outcomes). """
@@ -26,17 +35,14 @@ def sample_categorical(logits: jax.Array, key, uniform_mix: float = 0.01, sample
   threshold = jnp.minimum(sample_threshold, jnp.min(max_probs))
   #perform the thresholding
   probs = starting_probs * (starting_probs >= threshold)
-  #renormalize
   normalization = jnp.sum(probs, axis=-1, keepdims=True)
   #TODO: The normalization == 0 is probably not necessary
   probs = probs / (normalization + (normalization == 0))
-  uniform = jnp.ones_like(probs) / probs.shape[-1]
-  # Mix the probability with the uniform distribution.
-  probs = (1.0 - uniform_mix) * probs + uniform_mix * uniform
+  #renormalize
   # Recalculate the logits
-  logits_with_uniform = jnp.log(probs)
+  thresholded_logits = jnp.log(probs)
   num_classes = logits.shape[-1]
-  sampled_classes = jax.random.categorical(key, logits_with_uniform, axis=-1)
+  sampled_classes = jax.random.categorical(key, thresholded_logits, axis=-1)
   oh_sampled_classes = jax.nn.one_hot(sampled_classes, num_classes, axis=-1)
   #Perform the STE
   output = jax.lax.stop_gradient(oh_sampled_classes) + (probs - jax.lax.stop_gradient(probs))

@@ -1,5 +1,6 @@
 
 from games.jax_leduc import JaxLeduc
+from experiments.train_actor_critic import train_actor_critic
 from experiments.train_dreamer import train_model_ma
 from experiments.rnad_train import train_rnad
 from experiments.joint_train import joint_train_loop
@@ -17,6 +18,8 @@ def main():
     train_model_ma(args, game)
   elif args.train_mode == "rnad":
     train_rnad(args)
+  elif args.train_mode == "actor_critic":
+    train_actor_critic(args)
   else:
     joint_train_loop(args, game)
     

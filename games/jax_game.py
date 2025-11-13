@@ -1,7 +1,14 @@
 from abc import ABC, abstractmethod
 import chex
 import jax.numpy as jnp
-    
+
+class InformationType():
+  MDP = 0 # Markov decision process (num_players == 1)
+  POMDP = 1 # Partially observable Markov decision process (num_players == 1)
+  PIG = 2 # Perfect information game (num_players > 1)
+  IIG = 3 # Imperfect information game (num_players > 1)
+
+
 class GameState(ABC):
   pass
 
@@ -99,6 +106,12 @@ class JaxGame(ABC):
   
   @abstractmethod
   def params_dict(self)->dict:
+    pass
+  @abstractmethod
+  def information_type(self)->int:
+    """Returns what kind of information
+    this game provides. The types are detailed in
+    the InformationType class."""
     pass
 
   @abstractmethod

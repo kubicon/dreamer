@@ -3,7 +3,7 @@ import chex
 import jax.numpy as jnp
 
 import functools
-from games.jax_game import JaxGame, GameState
+from games.jax_game import JaxGame, GameState, InformationType
 
 
 @chex.dataclass(frozen=True)
@@ -31,6 +31,9 @@ class JaxGoofspiel(JaxGame):
     #Possible to also add other relevant information
     # for now just the cards will do to organize into subdirs
     return {"num_cards" : self.cards}
+  
+  def information_type(self):
+    return InformationType.IIG
   
   def num_players(self):
     return 2

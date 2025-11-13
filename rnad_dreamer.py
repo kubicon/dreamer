@@ -15,9 +15,9 @@ import os
 from functools import partial
 
 from dreamer_ma import DreamerMA, DreamerMAOptimizers
-from networks import initialize_rnad_optimizers, RNaDOptimizers, RNaDNetwork, IsetDecoder, Predictor, LegalActionsNetwork, DynamicsPredictor, SequenceModel, JointIsetEncoder
-from train_utils import RNaDConfig, RNaDTimeStep, load_model, save_model, symexp, get_loss_mean_with_mask
+from networks import *
 from distributions import sample_categorical, get_bin_log_prob
+from train_utils import * 
 from games.jax_game import GameState
 
   
@@ -124,34 +124,6 @@ class EntropySchedule:
 
 
 
-  
-
-def _policy_ratio(pi: chex.Array, mu: chex.Array, actions_oh: chex.Array, valid: chex.Array) -> chex.Array: 
-  pi_actions_prob = jnp.sum(pi * actions_oh, axis=-1, keepdims=True) * valid + (1 - valid)
-  mu_actions_prob = jnp.sum(mu * actions_oh, axis=-1, keepdims=True) * valid + (1 - valid)
-  
-  return pi_actions_prob / mu_actions_prob
-  
-def tree_where(pred: chex.Array, x: chex.ArrayTree, y: chex.ArrayTree) -> chex.ArrayTree:
-  
-  def _where(x, y):
-    return jnp.where(pred, x, y)
-  
-  return jax.tree.map(_where, x, y)
-  
-def apply_force_with_threshold(decision_outputs: chex.Array, force: chex.Array,
-                               threshold: float,
-                               threshold_center: chex.Array) -> chex.Array:
-  """Apply the force with below a given threshold."""
-  chex.assert_equal_shape((decision_outputs, force, threshold_center))
-  can_decrease = decision_outputs - threshold_center > -threshold
-  can_increase = decision_outputs - threshold_center < threshold
-  force_negative = jnp.minimum(force, 0.0)
-  force_positive = jnp.maximum(force, 0.0)
-  clipped_force = can_decrease * force_negative + can_increase * force_positive
-  return decision_outputs * lax.stop_gradient(clipped_force)
-
-
 
 def neurd_loss(
   logits: chex.Array,
@@ -190,10 +162,10 @@ def v_trace(
   gamma: float = 1.0 # Discount factor
 ):
   
-  importance_sampling = _policy_ratio(network_policy, sampling_policy, action_oh, valid)
+  importance_sampling = policy_ratio(network_policy, sampling_policy, action_oh, valid)
   
   # The reason we use this is to ensure this is weighted by the amount of the times we sample it
-  inverted_sampling = _policy_ratio(jnp.ones_like(sampling_policy), sampling_policy, action_oh, valid)
+  inverted_sampling = policy_ratio(jnp.ones_like(sampling_policy), sampling_policy, action_oh, valid)
   
   #[Trajectory, Batch, Player]
   #This actually computes KL-divergence from the reference policy, despite being called entropy.
@@ -301,7 +273,7 @@ class RNaDDreamer():
     self.non_chance_trajectory_max = self.world_model.non_chance_trajectory_max - 1
     self.num_players = self.world_model.game.num_players()
 
-    self.example_hidden = jnp.zeros(self.world_model.config.hidden_state_size)
+    self.example_hidden = jnp.zeros(self.world_model.config.sequential_network_details[0])
     self.example_categorical = jnp.zeros((self.world_model.config.encoded_classes, self.world_model.config.encoded_categories))
     
     self.rng_key = jax.random.key(self.config.seed)
@@ -333,7 +305,7 @@ class RNaDDreamer():
     valid = np.array(0, dtype=np.float32)
     reward = np.array(0, dtype=np.float32)
     
-    ts = RNaDTimeStep(
+    ts = ActorCriticTimeStep(
       valid = valid,
       obs = obs,
       legal = legal,
@@ -418,7 +390,7 @@ class RNaDDreamer():
   @partial(nnx.jit, static_argnums=0)
   def sample_trajectories(self, key, rnad_network: RNaDNetwork, sequence_model: SequenceModel, dynamics: DynamicsPredictor,
                         predictor: Predictor, legal_network: LegalActionsNetwork, encoder: JointIsetEncoder, p1_iset_decoder:IsetDecoder,
-                        p2_iset_decoder: IsetDecoder) ->RNaDTimeStep:
+                        p2_iset_decoder: IsetDecoder) ->ActorCriticTimeStep:
     keys = jax.random.split(key, self.config.batch_size)
     sample_trajectory_func = self.sample_trajectory if self.config.use_learned_model else self.sample_trajectory_from_game
     batch_sample_trajectory = nnx.vmap(sample_trajectory_func, in_axes=(0, None, None, None, None, None, None, None, None), out_axes=1) 
@@ -429,7 +401,7 @@ class RNaDDreamer():
   @partial(nnx.jit, static_argnums=0)
   def sample_trajectory(self, key, rnad_network: RNaDNetwork, sequence_model: SequenceModel, dynamics: DynamicsPredictor,
                         predictor: Predictor, legal_network: LegalActionsNetwork, encoder: JointIsetEncoder, p1_iset_decoder:IsetDecoder,
-                        p2_iset_decoder: IsetDecoder) ->RNaDTimeStep:
+                        p2_iset_decoder: IsetDecoder) ->ActorCriticTimeStep:
     init_chance_sample_key, init_sample_key, trajectory_key, = jax.random.split(key, 3)
     trajectory_key = jax.random.split(trajectory_key, self.non_chance_trajectory_max)
   
@@ -456,7 +428,7 @@ class RNaDDreamer():
     init_obs = jnp.stack([init_p1_iset, init_p2_iset], axis=0)
     init_hidden = jnp.zeros(self.world_model.config.hidden_state_size)
     init_stoch = encoder(init_hidden, init_obs)
-    init_deter = sample_categorical(init_stoch, init_sample_key, uniform_mix=0.0, sample_threshold=self.config.state_sample_threshold)
+    init_deter = sample_categorical(init_stoch, init_sample_key, sample_threshold=self.config.state_sample_threshold)
     
     @chex.dataclass(frozen=True)
     class SampleTrajectoryCarry:
@@ -506,11 +478,9 @@ class RNaDDreamer():
       action, action_oh = vectorized_sample_action(action_sample_keys, pi)
       
       
-      flattened_action = jnp.reshape(action_oh, (*carry.deter_state.shape[:-2], -1))
-      gru_input = jnp.concatenate([carry.deter_state.reshape(*carry.deter_state.shape[:-2], -1), flattened_action], axis=-1) 
-      next_hidden = sequence_model(carry.hidden_state, gru_input)
+      next_hidden = sequence_model(carry.hidden_state, carry.deter_state, action_oh)
       next_stoch = dynamics(next_hidden)
-      next_deter = sample_categorical(next_stoch, state_sample_key, uniform_mix=0.0, sample_threshold=self.config.state_sample_threshold)
+      next_deter = sample_categorical(next_stoch, state_sample_key, sample_threshold=self.config.state_sample_threshold)
       next_reward, next_terminal, next_legal = self.world_model.get_predictor(predictor, legal_network, next_hidden, next_deter)
       next_terminal = jnp.logical_or(carry.terminal, next_terminal)
       # Dreamer can produce all actions to be invalid
@@ -518,7 +488,7 @@ class RNaDDreamer():
       # NOOP action. So, if one of the players has all actions invalid, then
       # the state is not valid
       valid = jnp.logical_and(jnp.logical_not(carry.terminal), jnp.all(normalization > 0))
-      timestep = RNaDTimeStep(
+      timestep = ActorCriticTimeStep(
         obs = obs,
         legal = carry.legal_actions,
         action = action_oh,
@@ -542,7 +512,7 @@ class RNaDDreamer():
   @partial(nnx.jit, static_argnums=0)
   def sample_trajectory_from_game(self, key, rnad_network: RNaDNetwork, sequence_model: SequenceModel, dynamics: DynamicsPredictor,
                         predictor: Predictor, legal_network: LegalActionsNetwork, encoder: JointIsetEncoder, p1_iset_decoder:IsetDecoder,
-                        p2_iset_decoder: IsetDecoder) ->RNaDTimeStep:
+                        p2_iset_decoder: IsetDecoder) ->ActorCriticTimeStep:
     
     trajectory_key = jax.random.split(key, self.trajectory_max)
   
@@ -606,7 +576,7 @@ class RNaDDreamer():
       next_terminal = jnp.logical_or(carry.terminal, next_terminal)
       next_chance = self.world_model.game.is_chance(next_game_state)
       valid = jnp.ones_like(next_rewards) - carry.terminal
-      timestep = RNaDTimeStep(
+      timestep = ActorCriticTimeStep(
         obs = obs,
         legal = carry.legal_actions,
         action = action_oh,
@@ -637,7 +607,7 @@ class RNaDDreamer():
     next_chance = next_chance + is_init_chance
     non_next_chance = jnp.nonzero(~next_chance, size=self.non_chance_trajectory_max)[0]
     #Taking advantage of -1 encoded as all zeros
-    filtered_timestep = RNaDTimeStep(obs = jnp.take_along_axis(timestep.obs, non_chance[..., None, None], axis=0),
+    filtered_timestep = ActorCriticTimeStep(obs = jnp.take_along_axis(timestep.obs, non_chance[..., None, None], axis=0),
                                     legal = jnp.take_along_axis(timestep.legal, non_chance[..., None, None], axis=0),
                                     action = jnp.take_along_axis(timestep.action, non_chance[..., None, None], axis=0),
                                     policy = jnp.take_along_axis(timestep.policy, non_chance[..., None, None], axis=0),
@@ -667,7 +637,7 @@ class RNaDDreamer():
     optimizers: RNaDOptimizers,
     prev_network: RNaDNetwork,
     _prev_network: RNaDNetwork,
-    timestep: RNaDTimeStep,
+    timestep: ActorCriticTimeStep,
     alpha: float,
     update_net, 
   ):
@@ -677,7 +647,7 @@ class RNaDDreamer():
       target_network: RNaDNetwork,
       prev_network: RNaDNetwork,
       _prev_network: RNaDNetwork,
-      timestep: RNaDTimeStep,
+      timestep: ActorCriticTimeStep,
       alpha: float,
     ):
       bins = jnp.arange((2 * self.config.bin_range) + 1) - self.config.bin_range

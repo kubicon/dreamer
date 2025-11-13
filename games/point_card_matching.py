@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import chex
 import functools
 
-from games.jax_game import JaxGame, GameState
+from games.jax_game import JaxGame, GameState, InformationType
 
 """A single player goofspiel inspired game.
 To mantain consistency with other JAX games,
@@ -67,6 +67,9 @@ class PointCardMatching(JaxGame):
   
   def params_dict(self):
     return {"num_cards": self.num_cards}
+  
+  def information_type(self):
+    return InformationType.MDP
 
   def num_players(self):
     return 1
@@ -193,6 +196,9 @@ class PointCardMatchingStochastic(JaxGame):
   
   def params_dict(self):
     return {"num_cards": self.num_cards, "chance_turn": self.chance_turn}
+  
+  def information_type(self):
+    return InformationType.MDP
 
   def num_players(self):
     return 1

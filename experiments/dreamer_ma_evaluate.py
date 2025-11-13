@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 
 from dreamer_ma import DreamerMA
 from rnad_dreamer_joint import RNaDDreamerJoint
+from dreamer_actor_critic import DreamerActorCritic
 from train_utils import load_model
 from experiments.eval_utils import model_walk_test, cartesian_product, WalkCarry
 #from pyinstrument import Profiler
@@ -157,19 +158,26 @@ def main():
        #To allow for retrieving the world model of already trained RNaD
       # particularly relevant when training jointly.
       if isinstance(model, RNaDDreamerJoint):
-        plot_subdir_str = "compound"
+        plot_subdir_str = "joint_rnad"
+        model = model.world_model
+      elif isinstance(model, DreamerActorCritic):
+        plot_subdir_str = "joint"
         model = model.world_model
       elif not isinstance(model, DreamerMA):
-        raise ValueError(f"The given model should be instance of RNaDDreamer or DreamerMA, not {model.__class__}")
+        raise ValueError(f"The given model should be instance of RNaDDreamer, DreamerActorCritic or DreamerMA, not {model.__class__}")
       first=False
     else:
       temp_model = load_model(model_path)
        #To allow for retrieving the world model of already trained RNaD
       # particularly relevant when training jointly.
       if isinstance(temp_model, RNaDDreamerJoint):
+        plot_subdir_str = "joint_rnad"
+        temp_model = temp_model.world_model
+      elif isinstance(temp_model, DreamerActorCritic):
+        plot_subdir_str = "joint"
         temp_model = temp_model.world_model
       elif not isinstance(temp_model, DreamerMA):
-        raise ValueError(f"The given model should be instance of RNaDDreamer or DreamerMA, not {model.__class__}")
+        raise ValueError(f"The given model should be instance of RNaDDreamer, DreamerActorCritic or DreamerMA, not {model.__class__}")
       #TODO: Updating this way still forces retracing of get_info and
       # initialize_structures of the game, since it is called in init. In general
       # we just need the state of the optimizers object from the model

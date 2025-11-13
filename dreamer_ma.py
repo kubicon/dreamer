@@ -6,9 +6,10 @@ import optax
 from functools import partial
 
 
-from train_utils import DreamerMAConfig, get_reference_policy, TimeStep, get_loss_mean_with_mask, PredictionStepWithLegal, symexp, save_model
-from distributions import get_normal_log_prob, get_bin_log_prob, kl_divergence, sample_categorical
-from networks import initialize_ma_dreamer_optimizers, DreamerMAOptimizers, SequenceModel, JointIsetEncoder, IsetDecoder, DynamicsPredictor, Predictor, LegalActionsNetwork
+
+from train_utils import DreamerMAConfig, TimeStep, get_loss_mean_with_mask, PredictionStepWithLegal, symexp, save_model
+from distributions import get_normal_log_prob, get_bin_log_prob, kl_divergence, sample_categorical, add_uniform_mix
+from networks import *
 from replay_buffer import ReplayBuffer
 
 
@@ -39,11 +40,16 @@ class DreamerMA():
     
     
     self.optimizers = initialize_ma_dreamer_optimizers(self.config, self.game, self.nnx_rngs)
+    hidden_state_size = self.config.sequential_network_details[0]
+    if hidden_state_size < 1:
+      hidden_state_size = self.game.num_players() * self.game.information_state_tensor_shape()
+    self.hidden_state_size = hidden_state_size
     self.learner_steps = 0
     
     #Assuming that this contains a terminal state as well
     self.trajectory_max = self.game.max_trajectory_length()
     self.non_chance_trajectory_max = self.game.max_trajectory_lenght_no_chance()
+
 
     self.action_dimension = self.game.num_distinct_actions()
     assert self.game.num_players() > 1, f"This implementation of Dreamer assumes a game with at least 2 players not {self.game.num_players()}"
@@ -97,16 +103,16 @@ class DreamerMA():
         
         action, obs, cur_key = xs
         stochastic_state = encoder(hidden_state, obs)
+        stochastic_state = add_uniform_mix(stochastic_state, self.config.uniform_mix)
         deterministic_state = sample_categorical(stochastic_state, cur_key)
         prior_stochastic_state = dynamics_model(hidden_state)
+        prior_stochastic_state = add_uniform_mix(prior_stochastic_state, self.config.uniform_mix)
         reward, done = predictor(hidden_state, deterministic_state)
         legal = legal_network(hidden_state, deterministic_state)
         decoded_p1_obs = p1_decoder(hidden_state, deterministic_state)
         decoded_p2_obs = p2_decoder(hidden_state, deterministic_state)
         decoded_obs = jnp.stack([decoded_p1_obs, decoded_p2_obs], axis=0)
-        flattened_action = jnp.reshape(action, (*deterministic_state.shape[:-2], -1))
-        gru_input = jnp.concatenate([deterministic_state.reshape(*deterministic_state.shape[:-2], -1), flattened_action], axis=-1) 
-        new_hidden = sequence_model(hidden_state, gru_input)
+        new_hidden = sequence_model(hidden_state, deterministic_state, action)
         preds = PredictionStepWithLegal(
                                 hidden_state = hidden_state,
                                 repr_state = stochastic_state,
@@ -120,14 +126,10 @@ class DreamerMA():
         return new_hidden, preds
       
       xs = (timestep.action, timestep.obs, sample_keys)
-      init_hidden = jnp.zeros((self.config.batch_size, self.config.hidden_state_size)) 
+      init_hidden = jnp.zeros((self.config.batch_size, self.hidden_state_size)) 
       vectorized_predict = nnx.vmap(_predict_over_timestep, in_axes=(0, 1, None, None, None, None, None, None, None), out_axes=(0, 1))
       _, predictions = vectorized_predict(init_hidden, xs, sequence_model, encoder, p1_decoder, p2_decoder, dynamics_model, predictor, legal_actions_network) 
 
-      init_action = timestep.action[0, 0]
-      init_deter = predictions.deter_state[0, 0]
-      flattened_action = jnp.reshape(init_action, (*init_deter.shape[:-2], -1))
-      gru_input = jnp.concatenate([init_deter.reshape(*init_deter.shape[:-2], -1), flattened_action], axis=-1) 
       #[Trajectory, Batch, num_players, obs_size]
       reconstruction_loss = -get_normal_log_prob(predictions.decoded_obs, timestep.obs)
       l_pred += get_loss_mean_with_mask(reconstruction_loss, timestep.valid[..., None, None])
@@ -149,7 +151,6 @@ class DreamerMA():
       #Using free bits to clip dynamics and representation losses
       # thus disabling their gradient when they are below free_bits_clip_threshold
       #[Trajectory, Batch, encoded_categories, encoded_classes]
-
       posterior = nnx.softmax(predictions.repr_state, axis=-1)
       prior = nnx.softmax(predictions.dynamics_state, axis=-1)
       #[Trajectory, Batch]
@@ -207,20 +208,17 @@ class DreamerMA():
     
 
   def world_model_train_step(self):
-    #_, p1_decoder_state = nnx.split(self.optimizers.p1_decoder_optimizer.model)
-    #jax.debug.breakpoint()
     rng_key = self.generate_key()
-    timestep = self.buffer.sample_batch(self.config.batch_size)
+    timestep = self.buffer.mixed_sample()
     loss, pred_step = self.cached_train(timestep, rng_key)
     #loss, pred_step = self.world_model_train(self.optimizers, timestep, rng_key)
     self.learner_steps += 1
     return loss, timestep, pred_step
 
-  def train_world_model(self, model_save_dir:str, num_steps:int, replay_fraction:float, print_each: int = -1, save_each: int = -1):
+  def train_world_model(self, model_save_dir:str, num_steps:int, print_each: int = -1, save_each: int = -1):
     #Start the training by sampling into the buffer,
     # to ensure that there are distinct data for at least one step
     self.buffer.add_batch(self.config.batch_size)
-    to_collect = 0 
     for i in range(num_steps):
       rng_key = self.generate_key()
       timestep = self.buffer.sample_batch(self.config.batch_size) 
@@ -230,11 +228,6 @@ class DreamerMA():
       if save_each > 0 and i % save_each == 0:
         model_file = model_save_dir + f"step_{i}.pkl"
         save_model(self, model_file)
-      to_collect += replay_fraction
-      if to_collect >= 1:
-        to_collect = int(to_collect)
-        self.buffer.add_batch(to_collect)
-        to_collect = 0
       self.learner_steps += 1
    
   def __getstate__(self):
@@ -317,8 +310,6 @@ class DreamerMA():
   
   @partial(nnx.jit, static_argnums=(0))
   def get_next_hidden(self, sequence_model:SequenceModel, hidden_state:chex.Array, deterministic_state:chex.Array, joint_action:chex.Array):
-    flattened_action = jnp.reshape(joint_action, (*deterministic_state.shape[:-2], -1))
-    gru_input = jnp.concatenate([deterministic_state.reshape(*deterministic_state.shape[:-2], -1), flattened_action], axis=-1) 
-    return sequence_model(hidden_state, gru_input)
+    return sequence_model(hidden_state, deterministic_state, joint_action)
     
     

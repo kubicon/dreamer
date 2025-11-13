@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import chex
 import functools
-from games.jax_game import JaxGame, GameState
+from games.jax_game import JaxGame, GameState, InformationType
 
 
 @chex.dataclass(frozen=True)
@@ -39,6 +39,9 @@ class FrozenLake(JaxGame):
     board_dims_str = f"{self.init_board.shape[0]}X{self.init_board.shape[1]}"
     return {"board_dims": board_dims_str, "init_pos" : self.init_player_pos, "max_timesteps": self.max_timesteps, "eps" : self.eps}
 
+  def information_type(self):
+    return InformationType.POMDP
+  
   def num_players(self):
     return 1
   

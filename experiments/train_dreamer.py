@@ -6,7 +6,7 @@ from games.jax_game import JaxGame
 from dreamer import DreamerConfig, Dreamer
 from dreamer_ma import DreamerMAConfig, DreamerMA
 from train_utils import load_model
-from replay_buffer import ReplayBuffer
+from replay_buffer import ReplayBuffer, BufferConfig
 
 def _get_seed(seed:int):
   if seed == -1:
@@ -31,6 +31,7 @@ def train_model_ma(args, game:JaxGame):
     config = DreamerMAConfig(
         batch_size=args.batch_size,
         seed=model_seed,
+        rng_seed = network_seed,
 
 
         #Weights of the individual loss terms of the world model
@@ -38,26 +39,35 @@ def train_model_ma(args, game:JaxGame):
         beta_dynamics = args.beta_dynamics,
         beta_representation = args.beta_representation,
         
-        hidden_state_size = args.hidden_state_size,
+        free_bits_clip_threshold = args.free_bits_threshold,
+        uniform_mix = args.uniform_mix,
+        
         encoded_classes = args.encoded_classes,
         encoded_categories = args.encoded_categories,
         bin_range = args.bin_range,
 
         # Ordered as (hidden_layer_features, num_hidden_layers)
+        sequential_network_details = (args.hidden_state_size, args.sequential_hidden_size, args.sequential_hidden_layers),
         encoder_network_details = (args.encoder_hidden_size, args.encoder_hidden_layers),
         decoder_network_details = (args.decoder_hidden_size, args.decoder_hidden_layers),
         dynamics_network_details = (args.dynamics_hidden_size, args.dynamics_hidden_layers),
         predictor_network_details = (args.predictor_hidden_size, args.predictor_hidden_layers),
         legal_actions_network_details = (args.legal_hidden_size, args.legal_hidden_layers),
 
-        learning_rate = args.learning_rate,
-        rng_seed = network_seed
+        learning_rate = args.learning_rate
     )
-    buffer = ReplayBuffer(game, trajectory_seed, buffer_sample_seed, args.replay_size)
+    buffer_config = BufferConfig(trajectory_seed = trajectory_seed,
+                                 buffer_sample_seed = buffer_sample_seed,
+                                 buffer_size = args.buffer_size,
+                                 on_policy = args.on_policy,
+                                 replay_ratio = args.replay_ratio)
+    buffer = ReplayBuffer(game, buffer_config, config)
     model = DreamerMA(
         config=config,
         buffer=buffer,
     )
+    buffer.cache_sampling(model.optimizers.sequence_optimizer.model,
+                          model.optimizers.encoder_optimizer.model)
   model_save_dir = args.model_save_dir
   game_name = game.game_name()
   empty = ""
@@ -91,9 +101,12 @@ def train_model(args, game:JaxGame):
         beta_prediction = args.beta_prediction,
         beta_dynamics = args.beta_dynamics,
         beta_representation = args.beta_representation,
+
         free_bits_clip_threshold = args.free_bits_threshold,
+        uniform_mix = args.uniform_mix,
         
-        hidden_state_size = args.hidden_state_size,
+        #Ordered as (hidden_state_size, hidden_layer_eatures, num_hidden_layers)
+        sequential_network_details = (args.hidden_state_size, args.sequential_mlp_features, args.sequential_mlp_layers),
         encoded_classes = args.encoded_classes,
         encoded_categories = args.encoded_categories,
         bin_range = args.bin_range,
@@ -107,11 +120,18 @@ def train_model(args, game:JaxGame):
         learning_rate = args.learning_rate,
         rng_seed = network_seed
     )
-    buffer = ReplayBuffer(game, trajectory_seed, buffer_sample_seed, args.replay_size)
+    buffer_config = BufferConfig(trajectory_seed = trajectory_seed,
+                                 buffer_sample_seed = buffer_sample_seed,
+                                 buffer_size = args.buffer_size,
+                                 on_policy = args.on_policy,
+                                 replay_ratio = args.replay_ratio)
+    buffer = ReplayBuffer(game, buffer_config, config)
     model = Dreamer(
         config=config,
         buffer = buffer,
     )
+    buffer.cache_sampling(model.optimizers.sequence_optimizer.model,
+                          model.optimizers.encoder_optimizer.model)
   
   model_save_dir = args.model_save_dir
   game_name = game.game_name()
