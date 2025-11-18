@@ -101,7 +101,7 @@ def add_rnad_arguments(parser: ArgumentParser, joint_train: bool =False) ->Argum
   
   diff_string = "ac_" if joint_train else ""
   ##RNaD parameters  
-  parser.add_argument("--target_network_update", type=float, default=1e-3, help="Update rate for target network")
+  parser.add_argument("--target_network_update", type=float, default=1e-3, help="EMA coefficient for the target network update.")
   parser.add_argument("--eta", type=float, default=0.2, help="Strenght of the regularization in RNaD. Used for the reward transformation and the KL regularization for V-trace.")
   parser.add_argument("--vtrace_eta", type=float, default=0.2, help="Strenght of the additional KL regularization term in V-trace.")
   parser.add_argument("--sampling_epsilon", type=float, default=0.0, help="Defines mix of uniform policy to the network learned policy during trajectory sampling.")

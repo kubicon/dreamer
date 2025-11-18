@@ -43,6 +43,17 @@ def joint_train_loop(args, game:JaxGame):
     trajectory_seed = ac_model.world_model.buffer.config.trajectory_seed
     buffer_sample_seed = ac_model.world_model.buffer.config.buffer_sample_seed
     replay_buffer = ac_model.world_model.buffer
+    dreamer_config = ac_model.world_model.config
+
+    if isinstance(ac_model, RNaDDreamerJoint):
+      replay_buffer.cache_sampling(ac_model.world_model.optimizers.sequence_optimizer.model,
+                                   ac_model.world_model.optimizers.encoder_optimizer.model,
+                                   ac_model.optimizers.rnad_optimizer.model)
+    else:
+      replay_buffer.cache_sampling(ac_model.world_model.optimizers.sequence_optimizer.model,
+                                   ac_model.world_model.optimizers.encoder_optimizer.model,
+                                   ac_model.optimizers.actor_optimizer.model)
+
   else:
     print("Creating clean model")
     dreamer_config = DreamerMAConfig(
@@ -186,7 +197,7 @@ def joint_train_loop(args, game:JaxGame):
 
   #Start the training by sampling into the buffer,
   # to ensure that there are distinct data for at least one step
-  replay_buffer.add_batch(dreamer_world_model.config.batch_size)
+  replay_buffer.add_batch(dreamer_config.batch_size)
   for s in range(args.num_steps):
     step = start_step + s
     if args.print_each > 0 and s % args.print_each == 0:

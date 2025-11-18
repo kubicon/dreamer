@@ -15,14 +15,13 @@ from networks import *
 from train_utils import *
 from typing import Any
 
-#jax.config.update("jax_debug_nans", True)
 
 
 def reinforce_loss_with_range(
   log_pi: chex.Array,
   policy: chex.Array,
   q_values: chex.Array, 
-  legal: chex.Array,
+  action_oh: chex.Array,
   return_range: chex.Array
 ):
   """Compute the Reinforce estimator score. Multiply this by -1 to get loss.
@@ -31,16 +30,16 @@ def reinforce_loss_with_range(
   advantage = jax.lax.stop_gradient(advantage / jnp.maximum(1, return_range))
 
   
-  neurd_loss_value = jnp.sum(legal * log_pi * advantage, axis=-1, keepdims=True)
+  reinforce_loss_value = jnp.sum(action_oh * log_pi * advantage, axis=-1, keepdims=True)
   
-  #jax.debug.breakpoint()
 
-  return neurd_loss_value
+  return reinforce_loss_value
 
 def td_estimate(
   v: chex.Array,
   valid: chex.Array,
   action_oh: chex.Array,
+  sampling_policy: chex.Array,
   log_sampling_policy: chex.Array,
   reward: chex.Array, # Still not regularized
   lambda_: float = 1.0, # Lambda parameter for V-trace
@@ -54,7 +53,7 @@ def td_estimate(
   
   
   #[Trajectory, Batch, Player]
-  regularization_entropy = -entropy_eta * jnp.sum(log_sampling_policy, axis=-1)
+  regularization_entropy = -entropy_eta * jnp.sum(sampling_policy * log_sampling_policy, axis=-1)
   
   #[Trajectory, Batch]
   # The MinMaxEnt objective
@@ -271,17 +270,17 @@ class DreamerActorCritic():
   
   #TODO: Is it necessary to pass all the models explicitly like this?
   @partial(nnx.jit, static_argnums=0)
-  def sample_trajectories(self, key, starting_points: PredictionStepWithLegal, rnad_network: RNaDNetwork, sequence_model: SequenceModel, dynamics: DynamicsPredictor,
+  def sample_trajectories(self, key, starting_points: PredictionStepWithLegal, actor_network: ActorNetwork, sequence_model: SequenceModel, dynamics: DynamicsPredictor,
                         predictor: Predictor, legal_network: LegalActionsNetwork, encoder: JointIsetEncoder, p1_iset_decoder:IsetDecoder,
                         p2_iset_decoder: IsetDecoder) ->ActorCriticTimeStep:
     keys = jax.random.split(key, self.config.batch_size)
     batch_sample_trajectory = nnx.vmap(self.sample_trajectory, in_axes=(0, 0, None, None, None, None, None, None, None, None), out_axes=1) 
-    return batch_sample_trajectory(keys, starting_points, rnad_network, sequence_model, dynamics, predictor, legal_network, encoder, p1_iset_decoder, p2_iset_decoder)
+    return batch_sample_trajectory(keys, starting_points, actor_network, sequence_model, dynamics, predictor, legal_network, encoder, p1_iset_decoder, p2_iset_decoder)
 
 
   #TODO: Is it necessary to pass all the models explicitly like this?
   @partial(nnx.jit, static_argnums=0)
-  def sample_trajectory(self, key, starting_point: PredictionStepWithLegal, rnad_network: RNaDNetwork, sequence_model: SequenceModel, dynamics: DynamicsPredictor,
+  def sample_trajectory(self, key, starting_point: PredictionStepWithLegal, actor_network: ActorNetwork, sequence_model: SequenceModel, dynamics: DynamicsPredictor,
                         predictor: Predictor, legal_network: LegalActionsNetwork, encoder: JointIsetEncoder, p1_iset_decoder:IsetDecoder,
                         p2_iset_decoder: IsetDecoder) ->ActorCriticTimeStep:
     #init_sample_key, trajectory_key, = jax.random.split(key)
@@ -314,14 +313,14 @@ class DreamerActorCritic():
     vectorized_sample_action = nnx.vmap(choice_wrapper, in_axes=(0, 0), out_axes=0)
 
     @nnx.scan(in_axes = (nnx.Carry, 0, None, None, None, None, None, None, None), out_axes=(nnx.Carry, 0))
-    def _sample_trajectory(carry: SampleTrajectoryCarry, key , rnad_network: RNaDNetwork, sequence_model: SequenceModel, dynamics: DynamicsPredictor, 
+    def _sample_trajectory(carry: SampleTrajectoryCarry, key , actor_network: ActorNetwork, sequence_model: SequenceModel, dynamics: DynamicsPredictor, 
                         predictor: Predictor, legal_network: LegalActionsNetwork, p1_iset_decoder:IsetDecoder,
                         p2_iset_decoder: IsetDecoder) -> tuple[SampleTrajectoryCarry, chex.Array]:
       
       
       obs = self.get_obs(p1_iset_decoder, p2_iset_decoder, carry.hidden_state, carry.deter_state)
       #get policy 
-      pi = self.get_policy_both(rnad_network, obs, carry.legal_actions)
+      pi = self.get_policy_both(actor_network, obs, carry.legal_actions)
       #uniform mix to the policy
       normalization = jnp.sum(carry.legal_actions, axis=-1, keepdims=True)
       # For each player samples a single action
@@ -357,7 +356,7 @@ class DreamerActorCritic():
          
       timestep = tree_where(valid, timestep, self.example_timestep)
       return new_carry, timestep
-    _, timestep = _sample_trajectory(init_carry, trajectory_key, rnad_network, sequence_model, dynamics, predictor, legal_network, p1_iset_decoder, p2_iset_decoder)
+    _, timestep = _sample_trajectory(init_carry, trajectory_key, actor_network, sequence_model, dynamics, predictor, legal_network, p1_iset_decoder, p2_iset_decoder)
     #[Trajectory, ...]
     return timestep
   
@@ -450,19 +449,21 @@ class DreamerActorCritic():
       v_target = self.get_v_from_dist(v_target_dist_logits)
       
       expanded_valid = jnp.expand_dims(timestep.valid, (-1, -2))
+
+      log_timestep_pi = legal_log_policy(timestep.policy, timestep.legal)
       
-      v_train_target, q_value = td_estimate(v_target, expanded_valid, timestep.policy, timestep.action, timestep.reward,
+      v_train_target, q_value = td_estimate(v_target, expanded_valid, timestep.action, timestep.policy, log_timestep_pi, timestep.reward,
                                         self.config.td_lambda, self.config.eta, self.config.gamma)
       
       q_mask = expanded_valid * timestep.legal
       percentiles = get_percentiles_with_mask(q_value, q_mask, jnp.array([self.config.upper_percentile, self.config.lower_percentile]))
       current_range = (percentiles[0] - percentiles[1])
-      new_range = (1 - self.config.range_ema_coeff) * current_range + self.config.range_ema_coeff * return_range
+      new_range = self.config.range_ema_coeff * current_range + (1 - self.config.range_ema_coeff) * return_range
       #v_train_target, q_value = jnp.zeros_like(v), jnp.zeros_like(pi)
       v_loss = -get_bin_log_prob(v_dist_logits, bins, jax.lax.stop_gradient(v_train_target))
       v_loss_value = get_loss_mean_with_mask(v_loss, expanded_valid)    
       
-      loss_reinforce = reinforce_loss_with_range(log_pi, pi, q_value, timestep.legal, new_range)
+      loss_reinforce = reinforce_loss_with_range(log_pi, pi, q_value, timestep.action, new_range)
       
       # The multiplication by -1 is critical here, otherwise we would
       # be minimizing the neurd term, but we want to maximize it.
@@ -569,7 +570,7 @@ class DreamerActorCritic():
     return img_loss, r_loss, new_range
   
   @partial(nnx.jit, static_argnums=(0))
-  def _jit_step_with_model(self, optimizers: JointOptimizers, world_model_optimizers:DreamerMAOptimizers,
+  def _jit_step_with_model(self, optimizers:ActorCriticOptimizers, world_model_optimizers:DreamerMAOptimizers,
                 trajectory_key, dreamer_timestep: TimeStep, 
                 dreamer_prediction_step:PredictionStepWithLegal, return_range:chex.Array):
     #
@@ -582,7 +583,7 @@ class DreamerActorCritic():
   def step(self, dreamer_timestep: TimeStep, dreamer_prediction_step:PredictionStepWithLegal):
     trajectory_key = self.get_next_rng_key()
     #img_loss, r_loss, self.return_range =  self._jit_step_with_model(self.optimizers, self.world_model.optimizers, trajectory_key, dreamer_timestep, dreamer_prediction_step, self.return_range)
-    img_loss, r_loss, self.return_range= self.cached_step(trajectory_key, dreamer_timestep, dreamer_prediction_step, self.return_range)
+    img_loss, r_loss, self.return_range = self.cached_step(trajectory_key, dreamer_timestep, dreamer_prediction_step, self.return_range)
     self.learner_steps += 1
     return img_loss, r_loss
 
@@ -592,7 +593,8 @@ class DreamerActorCritic():
             "world_model": self.world_model,
             "optimizers": nnx.state(self.optimizers),
             "steps": self.learner_steps,
-            "trajectory_key": self.rng_key}
+            "trajectory_key": self.rng_key,
+            "return_range" : self.return_range}
   
   def __setstate__(self, state):
     self.config = state["config"]
@@ -608,6 +610,8 @@ class DreamerActorCritic():
     self.rng_key = state["trajectory_key"]
     self.learner_steps = state["steps"]
     self.optimizers = update_nnx(self.optimizers, state["optimizers"])
+
+    self.return_range = state["return_range"]
     # #Necessary to correctly continue to train on the updated state of the optimizers
     # self.cached_step = nnx.cached_partial(self._jit_step_with_model, self.optimizers, self.prev_network, self._prev_network)
     # #Explicitly reinitialize the world model optimizers

@@ -328,6 +328,11 @@ class ReplayBuffer():
     
     vectorized_sample_action = nnx.vmap(choice_wrapper, in_axes=(0, 0), out_axes=0)
 
+    def get_actor_policy(actor_network: ActorNetwork | RNaDNetwork, obs, legal_actions):
+      return actor_network(obs, legal_actions)[0]
+    #per player vmap
+    vectorized_get_actor = nnx.vmap(get_actor_policy, in_axes=(None, 0, 0), out_axes=0)
+
     @nnx.scan(in_axes=(nnx.Carry, None, None, None, 0), out_axes=(nnx.Carry, 0))
     def _sample_trajectory(carry: SampleTrajectoryCarry, recurrent_network: SequenceModel, encoder_network:JointIsetEncoder, actor_network:ActorNetwork | RNaDNetwork, key) -> tuple[SampleTrajectoryCarry, chex.Array]:
       
@@ -338,15 +343,13 @@ class ReplayBuffer():
       obs = jnp.stack((p1_iset, p2_iset), axis=0)
       encoded_stoch = encoder_network(carry.hidden_state, obs)
       encoded_deter = sample_categorical(encoded_stoch, deter_sample_key)
-      #per player vmap
-      vectorized_get_actor = nnx.vmap(actor_network, in_axes=(0, 0), out_axes=0)
       if not self.use_iset:
         flat_deter = jnp.reshape(encoded_deter, (*encoded_deter.shape[:-2], -1))
         model_state = jnp.concatenate([carry.hidden_state, flat_deter], axis=-1)
         players_oh = jnp.eye(self.num_players)
         obs = jnp.concatenate([jnp.stack([model_state, model_state], axis=-2), players_oh], axis=-1)
       if self.config.on_policy:
-        pi = vectorized_get_actor(obs, carry.legal_actions)[0]
+        pi = vectorized_get_actor(actor_network, obs, carry.legal_actions)
       else:
         pi = get_reference_policy(obs, carry.legal_actions)
       is_chance = self.game.is_chance(carry.game_state)
