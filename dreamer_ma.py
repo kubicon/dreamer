@@ -265,6 +265,14 @@ class DreamerMA():
     """Calls the predictor and legal actions networks and 
     passes the reward, done logits and legal action logits through
     appropriate transformations to return the actual values"""
+    return self.get_predictor_no_jit(predictor_model, legal_model, hidden_state, deterministic_state,
+                                     terminal_threshold, legal_threshold)
+  
+  def get_predictor_no_jit(self, predictor_model: Predictor, legal_model: LegalActionsNetwork, 
+                    hidden_state: chex.Array, deterministic_state:chex.Array, terminal_threshold: float = 0.5, legal_threshold: float = 0.5):
+    """Calls the predictor and legal actions networks and 
+    passes the reward, done logits and legal action logits through
+    appropriate transformations to return the actual values"""
     #[2* bin_range + 1], [1]
     reward_bin_logits, done_logit = predictor_model(hidden_state, deterministic_state)
     legal_logit = legal_model(hidden_state, deterministic_state)
@@ -308,8 +316,14 @@ class DreamerMA():
   def get_encoder(self, encoder_model:JointIsetEncoder, hidden_state:chex.Array, obs: chex.Array):
     return encoder_model(hidden_state, obs)
   
+  def get_encoder_no_jit(self, encoder_model:JointIsetEncoder, hidden_state:chex.Array, obs: chex.Array):
+    return encoder_model(hidden_state, obs)
+  
   @partial(nnx.jit, static_argnums=(0))
   def get_next_hidden(self, sequence_model:SequenceModel, hidden_state:chex.Array, deterministic_state:chex.Array, joint_action:chex.Array):
+    return sequence_model(hidden_state, deterministic_state, joint_action)
+  
+  def get_next_hidden_no_jit(self, sequence_model:SequenceModel, hidden_state:chex.Array, deterministic_state:chex.Array, joint_action:chex.Array):
     return sequence_model(hidden_state, deterministic_state, joint_action)
     
     

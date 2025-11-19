@@ -5,7 +5,6 @@ import os
 from anytree import Node, RenderTree
 from anytree.exporter import DotExporter
 from dreamer_ma import DreamerMA
-from dreamer import Dreamer
 
 PAST_ACTION = 0
 PAST_CHANCE = 1
@@ -81,7 +80,7 @@ def custom_node_style(node: Node):
 #     return node.name
     #return ""
 
-def render_tree(root: Node, model: Dreamer| DreamerMA):
+def render_tree(root: Node, model: DreamerMA):
     game = model.game
     game_name = game.game_name()
     empty = ""
@@ -96,10 +95,6 @@ def render_tree(root: Node, model: Dreamer| DreamerMA):
                            nodeattrfunc=custom_node_style,
                            #nodenamefunc= custom_node_name,
                             edgeattrfunc=custom_edge_style)
-    # print("Format: ")
-    # for line in exporter:
-    #     print(line)
-    # breakpoint()
     exporter.to_picture(output_filename)
 
     print(f"Graphviz DOT code has been saved and rendered to {output_filename}")

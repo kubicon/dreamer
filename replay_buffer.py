@@ -122,14 +122,8 @@ class ReplayBuffer():
     # one by default produces invalid isets
     # and legals so it is not a problem 
     example_state, example_legals = self.game.initialize_structures()
-    if self.use_iset:
-      _, ex_p1_iset, ex_p2_iset, _ = self.game.get_info(example_state)
-      ex_obs = jnp.stack([ex_p1_iset, ex_p2_iset], axis=0)
-    else:
-      deter_size = self.wm_config.encoded_classes * self.wm_config.encoded_categories
-      ex_model_state = jnp.zeros(deter_size + self.hidden_state_size + self.num_players)
-      players_oh = jnp.eye(self.num_players)
-      ex_obs = jnp.concatenate([jnp.stack([ex_model_state, ex_model_state], axis=-2), players_oh], axis=-1)
+    _, ex_p1_iset, ex_p2_iset, _ = self.game.get_info(example_state)
+    ex_obs = jnp.stack([ex_p1_iset, ex_p2_iset], axis=0)
     legal = jnp.ones(example_legals.shape, dtype=jnp.int8)
     action = jax.nn.one_hot(jnp.argmax(legal, -1), legal.shape[-1]).astype(jnp.int8)
     policy = legal.astype(float) / jnp.sum(legal, axis=-1, keepdims=True)
@@ -343,13 +337,14 @@ class ReplayBuffer():
       obs = jnp.stack((p1_iset, p2_iset), axis=0)
       encoded_stoch = encoder_network(carry.hidden_state, obs)
       encoded_deter = sample_categorical(encoded_stoch, deter_sample_key)
+      obs_for_actor = obs
       if not self.use_iset:
         flat_deter = jnp.reshape(encoded_deter, (*encoded_deter.shape[:-2], -1))
         model_state = jnp.concatenate([carry.hidden_state, flat_deter], axis=-1)
         players_oh = jnp.eye(self.num_players)
-        obs = jnp.concatenate([jnp.stack([model_state, model_state], axis=-2), players_oh], axis=-1)
+        obs_for_actor = jnp.concatenate([jnp.stack([model_state, model_state], axis=-2), players_oh], axis=-1)
       if self.config.on_policy:
-        pi = vectorized_get_actor(actor_network, obs, carry.legal_actions)
+        pi = vectorized_get_actor(actor_network, obs_for_actor, carry.legal_actions)
       else:
         pi = get_reference_policy(obs, carry.legal_actions)
       is_chance = self.game.is_chance(carry.game_state)

@@ -261,7 +261,7 @@ class DreamerActorCritic():
       p2_iset = p2_decoder(hidden_state, deter_state)
       obs = jnp.stack([p1_iset, p2_iset], axis=0)
       return obs
-    flat_deter = deter_state.reshape((deter_state.shape[:-2], -1))
+    flat_deter = deter_state.reshape((*deter_state.shape[:-2], -1))
     players_oh = jnp.eye(self.num_players)
     players_oh = jnp.reshape(players_oh, (1, ) * (flat_deter.ndim - 1) + players_oh.shape)
     model_state = jnp.concatenate([hidden_state, flat_deter], axis=-1)
@@ -396,11 +396,15 @@ class DreamerActorCritic():
       obs = dreamer_timestep.obs[:-1]
     else:
       #These are sampled from the encoder produced stochastic states
-      flat_deters = jnp.reshape(dreamer_prediction_step.deter_state, (*dreamer_prediction_step.deter_state.shape[-2], -1))  
+      # once again, do not take the last one since it will be terminal
+      deters = dreamer_prediction_step.deter_state[:-1]
+      flat_deters = jnp.reshape(deters, (*deters.shape[:-2], -1))  
       players_oh = jnp.eye(self.num_players)
       players_oh = jnp.reshape(players_oh, (1, ) * (flat_deters.ndim - 1) + players_oh.shape)
-      model_states = jnp.concatenate([dreamer_prediction_step.hidden_state, flat_deters], axis=-1)
-      player_model_states = jnp.concatenate([jnp.stack([model_states, model_states], axis=-2), players_oh], axis=-1)
+      model_states = jnp.concatenate([dreamer_prediction_step.hidden_state[:-1], flat_deters], axis=-1)
+      stacked_model_states = jnp.stack([model_states, model_states], axis=-2)
+      players_oh = jnp.broadcast_to(players_oh, (*stacked_model_states.shape[:-1], players_oh.shape[-1]))
+      player_model_states = jnp.concatenate([stacked_model_states, players_oh], axis=-1)
       obs = player_model_states
     ac_timestep = ActorCriticTimeStep(obs = obs,
                                       legal=legal,
@@ -468,6 +472,7 @@ class DreamerActorCritic():
       # The multiplication by -1 is critical here, otherwise we would
       # be minimizing the neurd term, but we want to maximize it.
       reinforce_loss_value = -get_loss_mean_with_mask(loss_reinforce, expanded_valid)
+      #jax.debug.breakpoint()
 
       return v_loss_value + reinforce_loss_value, new_range
 

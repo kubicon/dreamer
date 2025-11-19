@@ -8,7 +8,8 @@ from games.jax_game import JaxGame, GameState, InformationType
 
 """A single player goofspiel inspired game.
 Basically just a match the point card game.
-Treated as a single target environment"""
+This version is actually treated as a 2p0s
+perfect information game with a dummy player 2 """
 
 @chex.dataclass(frozen=True)
 class PointCardMatchingState(GameState):
@@ -40,7 +41,7 @@ class PointCardMatching(JaxGame):
                                         point_cards = init_point_cards,
                                         terminal = jnp.array(False),
                                         turn = 0)
-    init_legals = jnp.ones(self.num_cards)
+    init_legals = jnp.stack([jnp.ones((self.num_cards)), jax.nn.one_hot(0, self.num_cards)], axis=0)
     return init_state, init_legals
   
   @functools.partial(jax.jit, static_argnums=(0))
@@ -48,9 +49,9 @@ class PointCardMatching(JaxGame):
     #starting at 0 points hence the + 1
     points_oh = jax.nn.one_hot(state.points, self.max_points + 1)
     state_tensor = jnp.concatenate([state.played_cards.ravel(), state.point_cards.ravel(), points_oh.ravel()])
-    #Return just a state tensor as both state tensor and observation
-    # this is a perfect information game
-    return state_tensor, state_tensor
+    p1_iset = jnp.concatenate([jax.nn.one_hot(0, 2), state_tensor], axis=0)
+    p2_iset = jnp.concatenate([jax.nn.one_hot(1, 2), state_tensor], axis=0)
+    return state_tensor, p1_iset, p2_iset, state_tensor
   
   def num_distinct_actions(self):
     return self.num_cards
@@ -59,16 +60,16 @@ class PointCardMatching(JaxGame):
     return self.max_turns
   
   def game_name(self):
-    return "point_card_matching"
+    return "point_card_matching_mp"
   
   def params_dict(self):
     return {"num_cards": self.num_cards}
   
   def information_type(self):
-    return InformationType.MDP
+    return InformationType.PIG
 
   def num_players(self):
-    return 1
+    return 2
   
   def observation_tensor_shape(self):
     return self.information_state_tensor_shape()
@@ -80,13 +81,15 @@ class PointCardMatching(JaxGame):
     return 2 * (self.max_turns * self.num_cards) + self.max_points + 1
   
   def information_state_tensor_shape(self):
-    return 2 * (self.max_turns * self.num_cards) + self.max_points + 1
+    return 2 + self.state_tensor_shape()
   
 
   @functools.partial(jax.jit, static_argnums=(0))
   def apply_action(self, state: PointCardMatchingState, action):
     turn_oh = jax.nn.one_hot(state.turn, self.max_turns)
     point_card_turn_oh = jax.nn.one_hot(state.turn + 1, self.max_turns)
+    #The second player is a dummy player
+    action = action[0]
     action_oh = jax.nn.one_hot(action, self.num_cards)
 
     new_played_cards = state.played_cards + (action_oh[None, ...] * turn_oh[..., None])
@@ -109,6 +112,7 @@ class PointCardMatching(JaxGame):
     # because of descending order.
     last_card_matched = jnp.sum(new_legals * jax.nn.one_hot(0, self.num_cards))
     reward = jnp.where(terminal, new_points + last_card_matched, jnp.zeros_like(new_points + last_card_matched))
+    new_legals = jnp.stack([new_legals, jax.nn.one_hot(0, self.num_cards)], axis=0)
 
     new_state = PointCardMatchingState(played_cards=new_played_cards,
                                        point_cards = new_point_cards,
@@ -162,7 +166,7 @@ class PointCardMatchingStochastic(JaxGame):
                                         terminal = jnp.array(False),
                                         turn= jnp.array(0),
                                         is_chance = init_chance)
-    init_legals = jnp.ones(self.num_cards)
+    init_legals = jnp.stack([jnp.ones((self.num_cards)), jax.nn.one_hot(0, self.num_cards)], axis=0)
     return init_state, init_legals
   
   @functools.partial(jax.jit, static_argnums=(0))
@@ -173,9 +177,9 @@ class PointCardMatchingStochastic(JaxGame):
 
     #Return invalid data on chance turn
     state_tensor = jnp.where(state.is_chance, jnp.zeros_like(state_tensor), state_tensor)
-    #Return just a state tensor as both state tensor and observation
-    # this is a perfect information game
-    return state_tensor, state_tensor
+    p1_iset = jnp.concatenate([jax.nn.one_hot(0, 2), state_tensor], axis=0)
+    p2_iset = jnp.concatenate([jax.nn.one_hot(1, 2), state_tensor], axis=0)
+    return state_tensor, p1_iset, p2_iset, state_tensor
   
   def num_distinct_actions(self):
     return self.num_cards
@@ -188,16 +192,16 @@ class PointCardMatchingStochastic(JaxGame):
     return self.num_cards
   
   def game_name(self):
-    return "point_card_matching_stochastic"
+    return "point_card_matching_stochastic_mp"
   
   def params_dict(self):
     return {"num_cards": self.num_cards, "chance_turn": self.chance_turn}
   
   def information_type(self):
-    return InformationType.MDP
+    return InformationType.PIG
 
   def num_players(self):
-    return 1
+    return 2
   
   def observation_tensor_shape(self):
     return self.information_state_tensor_shape()
@@ -209,7 +213,7 @@ class PointCardMatchingStochastic(JaxGame):
     return 2 * (self.max_turns * self.num_cards) + self.max_points + 1
   
   def information_state_tensor_shape(self):
-    return self.state_tensor_shape()
+    return 2 + self.state_tensor_shape()
   
   @functools.partial(jax.jit, static_argnums=(0))
   def generate_all_chance_outcomes(self, chance_state: PointCardMatchingStochasticState) ->tuple[PointCardMatchingStochasticState, chex.Array, chex.Array]:
@@ -249,7 +253,7 @@ class PointCardMatchingStochastic(JaxGame):
     return outcome_states, outcome_legals, outcome_probs
   
   def max_chance_outcomes(self):
-    return self.max_chance_outcomes
+    return self.chance_outcomes
   
   def is_chance(self, game_state: PointCardMatchingStochasticState):
     return game_state.is_chance
@@ -269,7 +273,7 @@ class PointCardMatchingStochastic(JaxGame):
     outcomes = jnp.arange(self.num_cards)
     def invalid_probs(game_state):
       return jnp.zeros(self.num_cards)
-    def chance_probs(game_state):
+    def chance_probs(game_state: PointCardMatchingStochasticState):
       played_point_cards = jnp.sum(game_state.point_cards, axis=0)
       legal_point_cards  = 1 - played_point_cards
       return legal_point_cards / jnp.sum(legal_point_cards)
@@ -288,13 +292,16 @@ class PointCardMatchingStochastic(JaxGame):
 
   @functools.partial(jax.jit, static_argnums=(0))
   def apply_action_chance(self, state: PointCardMatchingStochasticState, action):
+    #The convention is that in chance nodes player 2 
+    # action contains the outcome in 2 player games
+    action = action[1]
     turn_oh = jax.nn.one_hot(state.turn, self.max_turns)
     action_oh = jax.nn.one_hot(action, self.chance_outcomes)
     played_point_cards = jnp.sum(state.point_cards, axis=0)
     prev_point_card = jnp.argmax(jnp.sum(state.point_cards * turn_oh[..., None], axis=0)) 
 
     outcomes, legals, probs = self.generate_all_chance_outcomes(state)
-    outcome = jax.tree_util.tree_map(lambda x: jnp.sum(x * jnp.reshape(action_oh, (action_oh.shape[0], ) + (1,) * len(x.shape[1:])), axis=0).astype(x.dtype),outcomes)
+    outcome = jax.tree.map(lambda x: jnp.sum(x * jnp.reshape(action_oh, (action_oh.shape[0], ) + (1,) * len(x.shape[1:])), axis=0).astype(x.dtype),outcomes)
     legals = jnp.sum(action_oh[..., None] * legals, axis=0)
 
     num_played = jnp.sum(state.played_cards)
@@ -305,12 +312,16 @@ class PointCardMatchingStochastic(JaxGame):
     new_points = state.points + (prev_point_card == action)
     not_played = jnp.argmin(played_point_cards)
     last_card_matched = jnp.sum(legals * jax.nn.one_hot(not_played, self.num_cards))
+    legals = jnp.stack([legals, jax.nn.one_hot(0, self.num_cards)], axis=0)
     reward = jnp.where(terminal, new_points + last_card_matched, jnp.zeros_like(new_points + last_card_matched))
 
     return outcome, terminal, reward[0], legals
 
   @functools.partial(jax.jit, static_argnums=(0))
   def apply_action_no_chance(self, state: PointCardMatchingStochasticState, action):
+    #Dummy first player
+    action = action[0]
+
     turn_oh = jax.nn.one_hot(state.turn, self.max_turns)
     point_card_turn_oh = jax.nn.one_hot(state.turn + 1, self.max_turns)
     action_oh = jax.nn.one_hot(action, self.num_cards)
@@ -345,6 +356,7 @@ class PointCardMatchingStochastic(JaxGame):
     last_card_matched = jnp.sum(new_legals * jax.nn.one_hot(not_played, self.num_cards))
     reward = jnp.where(terminal, new_points + last_card_matched, jnp.zeros_like(new_points + last_card_matched))
 
+    new_legals = jnp.stack([new_legals, jax.nn.one_hot(0, self.num_cards)], axis=0)
 
     new_state = PointCardMatchingStochasticState(played_cards=new_played_cards,
                                       point_cards = new_point_cards,

@@ -7,7 +7,6 @@ import numpy as np
 from train_utils import get_reference_policy
 from games.jax_game import JaxGame, GameState
 from experiments.tree_view_utils import *
-from dreamer import Dreamer
 from dreamer_ma import DreamerMA
 
 
@@ -25,9 +24,9 @@ class WalkCarry:
   terminal: chex.Array
   after_chance: chex.Array
 
-def get_next_outcomes(model: DreamerMA| Dreamer, stoch_state: chex.Array,
+def get_next_outcomes(model: DreamerMA, stoch_state: chex.Array,
                       hidden_state: chex.Array, obs: chex.Array| np.ndarray,
-                      threshold: float = 0.05, verbose = False) ->list:
+                      threshold: float = 0.05) ->list:
   """Takes all possible stochastic state outcomes and then
   clusters them to the corresponding next outcome, based on 
   l2 distance between decoder and real iset"""
@@ -39,10 +38,6 @@ def get_next_outcomes(model: DreamerMA| Dreamer, stoch_state: chex.Array,
   num_categoricals = stoch_state.shape[0]
   next_deters = [[] for _ in range(num_next_obs)]
   probs = [[] for _ in range(num_next_obs)]
-  # Next obs has shape [num_next, num_players, iset_size] for multi-agent
-  # and [num_next, obs_size] for single agent
-  is_ma = obs.ndim == 3
-  get_closes_func = get_closest_next_ma if is_ma else get_closest_next
 
   num_classes = stoch_state.shape[0]
   deter_states = (stoch_state >= threshold).astype(int)
@@ -56,22 +51,12 @@ def get_next_outcomes(model: DreamerMA| Dreamer, stoch_state: chex.Array,
   for comb in combinations:
     prob = stoch_state[np.arange(num_categoricals), comb]
     sampled_deter = jax.nn.one_hot(comb, stoch_state.shape[-1])
-    next_closest_idx = get_closes_func(model, hidden_state, sampled_deter, obs)
+    next_closest_idx = get_closest_next_ma(model, hidden_state, sampled_deter, obs)
     next_deters[next_closest_idx].append(sampled_deter)
     probs[next_closest_idx].append(prob)
     
   return next_deters, probs
 
-def get_closest_next(model: Dreamer, hidden_state, next_deter, next_obs:np.ndarray):
-  """Find the index of the closest next state
-  this deterministic state corresponds to. With
-  respect to distance between real obs and decoded obs"""
-  if next_obs.ndim == 1 or next_obs.shape[0] == 1:
-    return 0
-  decoded_obs = model.get_decoder(model.optimizers.decoder_optimizer.model, hidden_state, next_deter)
-  next_dists = np.sum((decoded_obs[None, ...] - next_obs) ** 2, axis=-1)
-  next_closest  = np.argmin(next_dists)
-  return next_closest
 
 def get_closest_next_ma(model: DreamerMA, hidden_state, next_deter, next_isets: np.ndarray):
   """Find the index of the closest next state
@@ -97,7 +82,7 @@ def unroll_chance_node(game: JaxGame, game_state: GameState, num_chance_outcomes
   vectorized_apply = jax.vmap(game.apply_action, in_axes=(None, 0), out_axes=(0, 0, 0, 0))
   next_states, next_terminal, rewards, next_legal = vectorized_apply(game_state, outcomes)
   valid = jnp.nonzero(probs >= 1e-5, size=num_chance_outcomes)[0]
-  next_states = jax.tree_util.tree_map(lambda x: jnp.take_along_axis(x, jnp.expand_dims(valid, axis=range(1, x.ndim)), axis=0), next_states)
+  next_states = jax.tree.map(lambda x: jnp.take_along_axis(x, jnp.expand_dims(valid, axis=range(1, x.ndim)), axis=0), next_states)
   next_terminal = jnp.take_along_axis(next_terminal, jnp.expand_dims(valid, axis=range(1, next_terminal.ndim)), axis=0)
   rewards = jnp.take_along_axis(rewards, jnp.expand_dims(valid, axis=range(1, rewards.ndim)), axis=0)
   next_legal = jnp.take_along_axis(next_legal, jnp.expand_dims(valid, axis=range(1, next_legal.ndim)), axis=0)
@@ -164,7 +149,7 @@ def create_iset_map(curr_iset, amount_actions, curr_legal):
     iset_legal = [np.array(i) for i in iset_legal]
     return iset_map, iset_legal, isets, actions
 
-def model_walk_test(model:Dreamer|DreamerMA,
+def model_walk_test(model:DreamerMA,
                     all_outcome_check_fn,
                     one_outcome_check_fn,
                      difference_eps = 0.2, probability_eps = 0.05, probability_threshold=0.05
