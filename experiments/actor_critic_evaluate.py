@@ -8,13 +8,13 @@ import time
 import matplotlib.pyplot as plt
 
 
-from train_utils import load_model, RNaDConfig
+from train_utils import load_model
 from experiments.eval_utils import cartesian_product, stringify, find_closest_index, create_iset_map, unroll_chance_node
 from games.jax_game import JaxGame, GameState
 from games.model_game import DreamerModelGame, ModelGameState
-from rnad_dreamer import RNaDDreamer, RNaDConfig
-from rnad_dreamer_joint import RNaDDreamerJoint
-from dreamer_actor_critic import DreamerActorCritic
+
+from dreamer_ma import DreamerMA
+from ma_rssm import MARSSM
 
 parser = ArgumentParser()
 
@@ -35,45 +35,16 @@ loaded_parser.add_argument("--metric", type=str, default="br", choices=("br", "e
 
 nash_parser = experiment_parsers.add_parser(name="nash", help="Evaluate expected values of the model, best response values against it and also of a saved reference nash equilibrium strategy.")
 nash_parser.add_argument("--nash_strategy_path", type=str, default="experiments/goofspiel_nash.pkl", help="Path to the saved nash strategy in pickle format. Must be formatted as a tuple of behavioral strategies per tree depth and iset map per tree_depth.")
-   
 
-def model_walk_deterministic(model:RNaDDreamer):
-    """Just a sanity check to see whether the learned policies make sense at all for now.
-    Assumes no chance nodes in the game."""
-    game = model.world_model.game
-    def _tree_walk(game_state: GameState, legals: jax.Array,depth=0):
-        """Recursively walk through the game state tree."""
-        legals = np.asarray(legals)
-        _, p1_iset, p2_iset, _ = game.get_info(game_state)
-        joint_iset = jnp.stack([p1_iset, p2_iset], axis=0)
-        #TODO: For now the model is learned using the decoder 
-        # on original isets so it can be passed like that. Later, it might be necessary to
-        # get some latent transformation first
-        pi = model.get_policy_both(model.optimizers.rnad_optimizer.model, joint_iset, legals)
-        print(f"At state {game_state}")
-        print(f"Model learned policy: {pi}")
-        for ai1, a1 in enumerate(legals[0]):
-           if a1 < 0.5:
-              continue
-           for ai2, a2 in enumerate(legals[1]):
-            if a2 < 0.5:
-                continue
-            joint_action = jnp.asarray([ai1, ai2])
-            next_game_state, next_terminal, next_reward, next_legals =  game.apply_action(game_state, joint_action)
-            if next_terminal:
-              continue
-            _tree_walk(next_game_state, next_legals, depth+1)
-
-    init_state, init_legals = game.initialize_structures()
-    _tree_walk(init_state, init_legals)
-
-def extract_model_policy(model :RNaDDreamerJoint | RNaDDreamer| DreamerActorCritic, game: JaxGame | DreamerModelGame)-> tuple[list, list]:
+def extract_model_policy(model: DreamerMA, game: JaxGame | DreamerModelGame)-> tuple[list, list]:
   """Extracts policies for the whole game from the RNaD model and 
   returns them as per depth
   iset map and behavioral policies."""
   depth_behaviorals = []
   depth_iset_map = []
   game_actions = game.num_distinct_actions()
+
+  ma_rssm = model.optimizer.model
 
   vectorized_get_info = jax.vmap(game.get_info, in_axes=(0), out_axes=(0, 0, 0, 0))
   #vmap over the internal per action dimension first 
@@ -82,8 +53,7 @@ def extract_model_policy(model :RNaDDreamerJoint | RNaDDreamer| DreamerActorCrit
   vectorized_is_chance = jax.vmap(game.is_chance, in_axes=0, out_axes=0)
   vectorized_chance_info = jax.vmap(game.get_outcomes_and_probs, in_axes=0, out_axes=(0, 0))
   #vmap over the H(D) dimension first and then over the player dimension
-  vectorized_get_policy = nnx.vmap(nnx.vmap(model._jit_get_policy, in_axes=(None, 0, 0), out_axes=0), in_axes=(None, 0, 0), out_axes=0)
-  actor_network = model.optimizers.actor_optimizer.model if isinstance(model, DreamerActorCritic) else model.optimizers.rnad_optimizer.model
+  vectorized_get_policy = MARSSM.vmap_over_net(ma_rssm.policy_net(), in_axes=[(0, 0), (0, 0)], out_axes=[0, 0])
   #vectorized_get_policy = nnx.vmap(nnx.vmap(uniform_policy, in_axes=(0, 0), out_axes=0), in_axes=(0, 0), out_axes=0)
   def _tree_walk(game_states: GameState, legals_non_padded: jax.Array, depth=0):
      # Denoting this as A(D)
@@ -124,7 +94,7 @@ def extract_model_policy(model :RNaDDreamerJoint | RNaDDreamer| DreamerActorCrit
     p1_legal, p2_legal = legals[0], legals[1]
     legal = p1_legal[..., None] * p2_legal[..., None, :]
 
-    pi = vectorized_get_policy(actor_network, jnp.asarray(iset_map), jnp.asarray(iset_legal))
+    pi = vectorized_get_policy(jnp.asarray(iset_map), jnp.asarray(iset_legal))[0]
     
     
     p1_actions = np.reshape(np.tile(np.repeat(np.arange(max_actions), max_actions), curr_iset.shape[1]), (curr_iset.shape[1], -1))
@@ -167,7 +137,7 @@ def extract_model_policy(model :RNaDDreamerJoint | RNaDDreamer| DreamerActorCrit
       return
     _tree_walk(next_states, next_legals, depth + 1)
   init_state, init_legals = game.initialize_structures()
-  init_state_padded = jax.tree_util.tree_map(lambda x: x[None, ...], init_state)
+  init_state_padded = jax.tree_util.tree_map(lambda x: jnp.asarray(x)[None, ...], init_state)
   _tree_walk(init_state_padded, init_legals[:, None, ...])
   return depth_iset_map, depth_behaviorals
 
@@ -288,7 +258,7 @@ def compare_policies(game: JaxGame| DreamerModelGame, given_pols: tuple[list, li
   _tree_walk(init_state)
        
 
-def model_best_response(model: RNaDDreamer, game: JaxGame | DreamerModelGame, custom_policy: tuple[list, list] = None):
+def model_best_response(model: DreamerMA, game: JaxGame | DreamerModelGame, custom_policy: tuple[list, list] = None):
   """Compute counterfactual best response policies for both players and their 
   respective values.Returned as br value of p2 against p1
   , br value of p1 against p2, p1_br_policy, p2_br_policy.
@@ -320,8 +290,10 @@ def model_best_response(model: RNaDDreamer, game: JaxGame | DreamerModelGame, cu
   vectorized_is_chance = jax.vmap(game.is_chance, in_axes=0, out_axes=0)
   vectorized_chance_info = jax.vmap(game.get_outcomes_and_probs, in_axes=0, out_axes=(0, 0))
   if checking_model:
+    ma_rssm = model.optimizer.model
     #vmap over the H(D) dimension first and then over the player dimension
-    vectorized_get_policy = nnx.vmap(nnx.vmap(model._jit_get_policy, in_axes=(None, 0, 0), out_axes=0), in_axes=(None, 0, 0), out_axes=0)
+    vectorized_get_policy = MARSSM.vmap_over_net(ma_rssm.policy_net(), in_axes=[(0, 0), (0, 0)], out_axes=[0, 0])
+    
 
   else:
     """TODO: Think on how to vectorize it"""
@@ -378,7 +350,7 @@ def model_best_response(model: RNaDDreamer, game: JaxGame | DreamerModelGame, cu
     p1_legal, p2_legal = legals[0], legals[1]
     legal = p1_legal[..., None] * p2_legal[..., None, :]
 
-    pi = vectorized_get_policy(model.optimizers.rnad_optimizer.model, curr_iset, legals_non_padded) if checking_model else vectorized_get_policy(depth, curr_iset, legals_non_padded)
+    pi = vectorized_get_policy(curr_iset, legals_non_padded)[0] if checking_model else vectorized_get_policy(depth, curr_iset, legals_non_padded)
     #[Pl, H(D), A(D)]
     pi = np.pad(pi, ((0, 0), (0, 0), (0, max_actions - pi.shape[-1])), constant_values=0)
     #Get reaches for each player.
@@ -456,6 +428,7 @@ def model_best_response(model: RNaDDreamer, game: JaxGame | DreamerModelGame, cu
   _construct_structures(init_state_padded, init_legals[:, None, :], reaches=np.ones((3, 1)))
   depth_rewards = [np.stack((r, -r), axis=0) for r in depth_rewards]
   state_value = np.zeros((2, 1 ))
+  
   for d in range(len(depth_history_iset) -1, -1, -1):
     p1_joint_action_value = np.where(depth_continuations[d] < 0, depth_rewards[d][0], state_value[0][depth_continuations[d]])
     p2_joint_action_value = np.where(depth_continuations[d] < 0, depth_rewards[d][1], state_value[1][depth_continuations[d]])
@@ -520,9 +493,8 @@ def test_loaded(args):
   #profiler.start()
   first = True
   model = None
-  world_model = None
   game = None
-  plot_subdir_str = "rnad_only"
+  plot_subdir_str = "joint"
   algorithm_str = "RNaD"
   for filename in os.listdir(model_dir):
     if not os.path.isfile(os.path.join(model_dir, filename)):
@@ -541,38 +513,31 @@ def test_loaded(args):
     # else it will break
     if first:
       model = load_model(model_path)
-      if isinstance(model, RNaDDreamerJoint):
+      assert isinstance(model, DreamerMA), f"The loaded model should be an instance of DreamerMA. Instead got {model.__class__}"
+      if model.use_rnad:
         plot_subdir_str = "joint_rnad"
-      elif isinstance(model, DreamerActorCritic):
+      else:
         algorithm_str = "Actor-critic"
         plot_subdir_str = "joint"
-      elif not isinstance(model, RNaDDreamer): 
-        assert False, f"Loaded model should be an instance of RNaDDreamer or RNaDDreamerJoint not {model.__class__}"
-      world_model = model.world_model
-      game = DreamerModelGame(world_model) if args.use_model_game else world_model.game
+      game = DreamerModelGame(model) if args.use_model_game else model.game
       first=False
     else:
       temp_model = load_model(model_path)
-      assert isinstance(temp_model, (RNaDDreamer, RNaDDreamerJoint, DreamerActorCritic)), f"The given model should be an instance of RNaDDreamer, RNaDDreamerJoint or DreamerActorCritic, not {model.__class__}"
+      assert isinstance(temp_model, DreamerMA), f"The loaded model should be an instance of DreamerMA. Instead got {temp_model.__class__}"
       #TODO: Updating this way still forces retracing of get_info and
       # initialize_structures of the game, since it is called in init. In general
-      # we just need the state of the optimizers object from the model
+      # we just need the state of the MARSSM from the model
       # and the rest of the operations are redundant.
-      nnx.update(world_model.optimizers, nnx.split(temp_model.world_model.optimizers)[1])
-      nnx.update(model.optimizers, nnx.split(temp_model.optimizers)[1])
-      model.world_model.learner_steps = temp_model.world_model.learner_steps
+      nnx.update(model.optimizer, nnx.state(temp_model.optimizer))
+      model.actor_critic.learner_steps = temp_model.actor_critic.learner_steps
       model.learner_steps = temp_model.learner_steps
       #TODO: This forces reinitalization and retracing of the game jits.
       # But, we actually do need to retrace the jits, since they are just jax.jit
       # stored with the old parameters, so would produce exactly same results for every run
       if args.use_model_game:
-        game = DreamerModelGame(world_model)
+        game = DreamerModelGame(model)
       
     print(f"Restored model from {model_path}")
-    if isinstance(model, DreamerActorCritic) or model.config.use_learned_model:
-      print(f"Model is learned on Dreamer, that took {model.world_model.learner_steps} steps.")
-    else:
-      print(f"Model is trained on the original game.")
     if args.metric == "br":
       p1_metric, p2_metric, p1_br, p2_br = model_best_response(model, game)
     else:
@@ -611,12 +576,12 @@ def test_loaded(args):
   ax.set_ylabel(plot_title)
   ax.set_title(f"{plot_title} of Dreamer {algorithm_str}")
   empty = ""
-  game_params = model.world_model.game.params_dict()
+  game_params = model.game.params_dict()
   params_str = f'{empty.join(f"_{value}" for key, value in game_params.items())}'
   plt_dir = f"plots/{metric_str}/{plot_subdir_str}"
   if not os.path.exists(plt_dir):
     os.makedirs(plt_dir)
-  plt.savefig(f"{plt_dir}/{model.world_model.game.game_name()}{params_str}.pdf")
+  plt.savefig(f"{plt_dir}/{model.game.game_name()}{params_str}.pdf")
 
 def test_nash(args, saved_nash_path: str):
   model_path = args.model_dir
@@ -639,11 +604,9 @@ def test_nash(args, saved_nash_path: str):
   # buffer = ReplayBuffer(game, 0, 0, 100)
   # dreamer_model = DreamerMA(DreamerMAConfig(), buffer)
   # model = RNaDDreamerJoint(dreamer_model, RNaDConfig())
-  assert isinstance(model, (RNaDDreamer, RNaDDreamerJoint, DreamerActorCritic)), f"The given model should be an instance of RNaDDreamer, RNaDDreamerJoint or DreamerActorCritic, not {model.__class__}"
-  if not model.config.use_learned_model:
-    print(f"The model is learned on the real game {model.world_model.game.game_name()}")
+  assert isinstance(model, DreamerMA), f"The loaded model should be an instance of DreamerMA. Instead got {model.__class__}"
   
-  game = DreamerModelGame(model.world_model) if args.use_model_game else  model.world_model.game
+  game = DreamerModelGame(model) if args.use_model_game else  model.game
   p1_nash_val, p2_nash_val, nash_iset_map, nash_behaviorals = load_model(nash_path)
   print(f"Loaded nash policies of game with game value {p1_nash_val} (from player 1 perspective)")
   model_map, model_behaviorals = extract_model_policy(model, game)
@@ -659,6 +622,7 @@ def test_nash(args, saved_nash_path: str):
   model_p1_val, model_p2_val = policy_expected_value(game, (model_map, model_behaviorals))
   model_p1_val, model_p2_val = args.scale_factor * model_p1_val, args.scale_factor * model_p2_val
   print(f"Model values {model_p1_val}, {model_p2_val}")
+  jax.debug.breakpoint()
   p2_br_val, p1_br_val, p1_br, p2_br = model_best_response(model, game)
   p1_br_val, p2_br_val = args.scale_factor * p1_br_val, args.scale_factor * p2_br_val
   print(f"P2 best response value against p1: {p2_br_val}")

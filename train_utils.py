@@ -20,7 +20,7 @@ class PredictionStep():
 
 @chex.dataclass(frozen=True)
 class PredictionStepWithLegal():
-  hidden_state: chex.Array
+  recurrent_state: chex.Array
   repr_state: chex.Array
   deter_state: chex.Array
   decoded_obs: chex.Array
@@ -64,8 +64,6 @@ class TimeStep():
 
 @chex.dataclass(frozen=True)
 class BufferConfig:
-  trajectory_seed: int
-  buffer_sample_seed:int
   buffer_size: int
   on_policy: bool
   replay_ratio: int = -1 #How many steps should be collected from the replay buffer per
@@ -73,11 +71,6 @@ class BufferConfig:
 
 @chex.dataclass(frozen=True)
 class RNaDConfig:
-  
-  use_learned_model: bool = True # Whether to use the learned Dreamer model for sampling. If
-                                  # False, uses the original game environment. Just a debug flag that will be likely removed later.
-
-  batch_size: int = 64
 
   beta_imagination: float = 1.0
   beta_real: float = 0.3 # Coeficients for the loss parts. Beta imagination is used for Dreamer
@@ -99,6 +92,11 @@ class RNaDConfig:
   gamma_vtrace: float = 1.0 # Discount factor
   lambda_vtrace: float = 1.0 #Same as TD-learning lambda
 
+  upper_percentile: float = 95
+  lower_percentile: float = 5 #Percentiles for the return normalization range
+  range_ema_coeff: float = 0.99 # Coeeficient for the EMA update of retun normalization range
+  num_last: int = -1 #How many last timesteps to take from each trajectory for the imagination unroll. Take all of them if -1
+
   #NeuRD parameters
   neurd_clip: float = 10000
   neurd_threshold: float = 2.0
@@ -111,57 +109,20 @@ class RNaDConfig:
   terminal_threshold:float =  0.5 #Thresholds when to consider the state terminal, or the actions
   legal_threshold: float = 0.5    # Legal, when we take the sigmoid over the Dreamer produced logits.
   bin_range: int = 20 #Number of the exponentially spaced bins for the value categorical distribution prediction
-
-  learning_rate: float = 3e-4
+  
   target_network_update: float = 1e-3
 
-  seed: int = 42
-  network_seed: int = 99
-
-
-@chex.dataclass(frozen=True)
-class DreamerConfig():
-  batch_size: int
-  seed: int
-
-
-  hidden_state_size: int #Size of the RNN hidden state
-  encoded_classes: int # Number of classes for each categorical distribution in state
-  encoded_categories: int # Number of categorical distributions in state
-
-  learning_rate: float
-  rng_seed: int
-
-
-
-  #Weights of the individual loss terms of the world model
-  beta_prediction: float = 1
-  beta_dynamics: float = 1
-  beta_representation: float = 0.1
-
-  free_bits_clip_threshold: float = 1 #Threshold for loss clip in free bits. 
-  
-  bin_range: int = 20 #Number of the exponentially spaced bins for certain predictions such as reward in one direction, bins will be spaced out as symexp([-bin_range, ..., bin_range])
-  
-  # Ordered as (hidden_layer_features, num_hidden_layers)
-  encoder_network_details: tuple[int, int] = (256, 1)
-  decoder_network_details: tuple[int, int] = (256, 1)
-  dynamics_network_details: tuple[int, int] = (256, 1)
-  predictor_network_details: tuple[int, int] = (256, 1)
 
 @chex.dataclass(frozen=True)
 class DreamerMAConfig():
   batch_size: int
-  seed: int
-  rng_seed: int
 
 
   encoded_classes: int # Number of classes for each categorical distribution in state
   encoded_categories: int # Number of categorical distributions in state
 
-  learning_rate: float = 3e-4
 
-
+  use_original_iset: bool = False
 
   #Weights of the individual loss terms of the world model
   beta_prediction: float = 1
@@ -174,21 +135,19 @@ class DreamerMAConfig():
   
   bin_range: int = 20 #Number of the exponentially spaced bins for certain predictions such as reward in one direction, bins will be spaced out as symexp([-bin_range, ..., bin_range])
   
-  sequential_network_details: tuple[int, int, int] = (256, 64, 1) # Ordered as size of hidden state, number of features for the MLP processing, number of layers in the MLP processing
+  sequential_network_details: tuple[int, int, int] = (256, 256, 1) # Ordered as size of hidden state, number of features for the MLP processing, number of layers in the MLP processing
+  encoder_network_details: tuple[int, int] = (256, 256, 1) #Ordered as observation tokens size, hidden_layer_features, num_hidden_layers
   # Ordered as (hidden_layer_features, num_hidden_layers)
-  encoder_network_details: tuple[int, int] = (256, 1)
   decoder_network_details: tuple[int, int] = (256, 1)
+  observer_network_details: tuple[int, int] = (256, 1)
   dynamics_network_details: tuple[int, int] = (256, 1)
-  predictor_network_details: tuple[int, int] = (256, 1)
+  reward_predictor_network_details: tuple[int, int] = (256, 1)
+  done_predictor_network_details: tuple[int, int] = (256, 1)
   legal_actions_network_details: tuple[int, int] = (256, 1)
 
 @chex.dataclass(frozen=True)
 class ActorCriticConfig():
-  seed: int
-  network_seed: int
-  batch_size: int
 
-  learning_rate: float = 3e-4
   # The EMA coefficient for update
   # of the target network parameters
   # is 1 - this value
@@ -204,11 +163,13 @@ class ActorCriticConfig():
   upper_percentile: float = 95
   lower_percentile: float = 5 #Percentiles for the return normalization range
   range_ema_coeff: float = 0.99 # Coeeficient for the EMA update of retun normalization range
+  num_last: int = -1 #How many last timesteps to take from each trajectory for the imagination unroll. Take all of them if -1
 
   #Ordered as hidden layer size, num hidden layers
   actor_network_details: Tuple[int, int] = (256, 1)
   critic_network_details: Tuple[int, int] = (256, 1)
   
+  sampling_epsilon: float = 0.0
   state_sample_threshold: float = 0.05 #A threshold when sampling states. The outcomes for
                                         #each categorical below this threshold are ignored (or, specificaly a minimum
                                         # of this threshold and the lowest of max probability outcomes of the categoricals). 
@@ -216,6 +177,19 @@ class ActorCriticConfig():
   legal_threshold: float = 0.5    # Legal, when we take the sigmoid over the Dreamer produced logits.
   bin_range: int = 20 #Number of the exponentially spaced bins for the value categorical distribution prediction
 
+
+@chex.dataclass(frozen=True)
+class OptimizerConfig():
+  lr: float = 3e-4,
+  agc: float = 0.3,
+  eps: float = 1e-20,
+  beta1: float = 0.9,
+  beta2: float = 0.999,
+  momentum: bool = True,
+  nesterov: bool = False,
+  schedule: str = 'const',
+  warmup: int = 1000,
+  anneal: int = 0,
 
 
 
@@ -325,6 +299,64 @@ def get_percentiles_with_mask(data: chex.Array, mask:chex.Array, percentile: che
   scale_factor = num_valid / data.size
   new_percentile = scale_factor * percentile
   return jnp.percentile(masked_data, new_percentile)
+
+
+def get_value_from_bins(dist_logits: chex.Array, bin_range: int):
+  """Reads out the prediction from the predicted
+  logits of the categorical distribution, by multiplying it with the bins."""
+  #Implementing the summation order suggestion
+  # from https://arxiv.org/pdf/2301.04104 page 18
+  bins = jnp.arange((2 * bin_range) + 1) - bin_range
+  bins = bins.reshape((1,) * (dist_logits.ndim - 1) + bins.shape)
+  v_probs = jax.nn.softmax(dist_logits)
+  pos_bins = bins * (bins >= 0)
+  # flip the probs and bins for the negative
+  # to ensure summation from small to large in magnitude 
+  neg_bins = bins * (bins < 0)
+  v_pos_part = jnp.sum(v_probs * pos_bins, axis=-1, keepdims=True)
+  v_neg_part = jnp.sum(jnp.flip(v_probs * neg_bins), axis=-1, keepdims=True)
+  v = v_pos_part + v_neg_part
+  v = symexp(v)
+  return v
+
+def wm_timestep_to_timestep(wm_timestep: TimeStep, wm_prediction_step: PredictionStepWithLegal, is_iig: bool) ->ActorCriticTimeStep:
+    #Do not forget that the Dreamer timestep rewards and terminal
+    # are w.r.t. the current state. We want
+    # reward for playing an action in the current state, not for getting to it
+    # so, they are shifted by 1 forward in time
+    # compared to our desired RNaD timesteps.
+    # We also do not want the last step, since that is always a terminal state
+    legal = wm_timestep.legal[:-1]
+    action = wm_timestep.action[:-1]
+    policy = wm_timestep.policy[:-1]
+    reward = wm_timestep.reward[1:]
+    valid = jnp.logical_and(~wm_timestep.terminal[:-1], wm_timestep.valid[:-1])
+
+    num_players = action.shape[-2]
+    
+    #if we shouldnt use infosets we replace obs
+    # with the predicted model states
+    if is_iig:
+      obs = wm_timestep.obs[:-1]
+    else:
+      #These are sampled from the encoder produced stochastic states
+      # once again, do not take the last one since it will be terminal
+      deters = wm_prediction_step.deter_state[:-1]
+      flat_deters = jnp.reshape(deters, (*deters.shape[:-2], -1))  
+      players_oh = jnp.eye(num_players)
+      players_oh = jnp.reshape(players_oh, (1, ) * (flat_deters.ndim - 1) + players_oh.shape)
+      model_states = jnp.concatenate([wm_prediction_step.recurrent_state[:-1], flat_deters], axis=-1)
+      stacked_model_states = jnp.stack([model_states, model_states], axis=-2)
+      players_oh = jnp.broadcast_to(players_oh, (*stacked_model_states.shape[:-1], players_oh.shape[-1]))
+      player_model_states = jnp.concatenate([stacked_model_states, players_oh], axis=-1)
+      obs = player_model_states
+    ac_timestep = ActorCriticTimeStep(obs = obs,
+                                      legal=legal,
+                                      action=action,
+                                      policy = policy,
+                                      reward = reward,
+                                      valid=valid)
+    return ac_timestep
   
 def get_reference_policy(obs: chex.Array, legal_actions: chex.Array):
   """Returns the reference sampling policy. For now returns just a uniform policy.

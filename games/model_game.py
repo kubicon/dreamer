@@ -8,19 +8,19 @@ from functools import partial
 
 from dreamer_ma import DreamerMA
 from experiments.eval_utils import cartesian_product, unroll_chance_node
-from networks import *
+from ma_rssm import MARSSM
 
 @chex.dataclass
 class ModelGameState:
   turn: int
-  hidden_state: chex.Array # The recurrent network state
+  recurrent_state: chex.Array # The recurrent network state
   deter_state: chex.Array # The one-hot sampled outcome of the categoricals
   stoch_state: chex.Array # The softmaxed distribution over the latent deter states
                           # with the invalid outcomes already filtered out
 
 
 class DreamerModelGame():
-  def __init__(self, world_model: DreamerMA, probability_threshold = 0.05, legal_threshold=0.5, terminal_threshold=0.5):
+  def __init__(self, model: DreamerMA, probability_threshold = 0.05, legal_threshold=0.5, terminal_threshold=0.5):
     """A game which has structure corresponding to
     a JAX game, but it is instead built from the learned Dreamer
     world model. It operates like this: It begins with a
@@ -34,19 +34,20 @@ class DreamerModelGame():
     IMPORTANT! Due to padding the chance outcomes to the maximum
     amount of chance outcomes (categories ** classes), this will only reasonably work
     for small latent stochastic states."""
-    self.game = world_model.game
-    self.hidden_state_size = world_model.hidden_state_size
-    self.num_classes = world_model.config.encoded_classes
-    self.num_categories = world_model.config.encoded_categories
+    self.game = model.game
+    self.recurrent_state_size = model.recurrent_state_size
+    self.ma_rssm = model.optimizer.model
+    self.num_classes = model.wm_config.encoded_classes
+    self.num_categories = model.wm_config.encoded_categories
 
     self.deter_state_size = self.num_classes * self.num_categories
-    self.players = world_model.game.num_players()
+    self.players = model.game.num_players()
 
-    self.actions = world_model.game.num_distinct_actions()
+    self.actions = model.game.num_distinct_actions()
 
     self.max_chance_outcomes = (self.num_categories) ** self.num_classes
     #Every step will have a corresponding chance node
-    self.trajectory_max = 2 * world_model.trajectory_max
+    self.trajectory_max = 2 * model.trajectory_max
 
     self.probabilty_threshold = probability_threshold
     self.legal_threshold = legal_threshold
@@ -59,14 +60,13 @@ class DreamerModelGame():
     # shape [max_chance_outcomes, encoded_classes]
     self.outcome_indices = cartesian_product(*class_indices)
 
-    self.init_hidden = jnp.zeros(self.hidden_state_size)
-
-    self.cache_model_calls(world_model)
+    self.cache_model_calls(model)
 
   
   @partial(nnx.jit, static_argnums=0)
-  def get_init_stoch(self, encoder_network: JointIsetEncoder, obs):
-    stoch_logits = encoder_network(self.init_hidden, obs)
+  def get_init_stoch(self, ma_rssm: MARSSM, obs):
+    init_recurrent = ma_rssm.get_init_recurrent()
+    stoch_logits = ma_rssm.get_encoder(init_recurrent, obs)
     stoch_unfiltered = nnx.softmax(stoch_logits, axis=-1)
     stoch_unnormalized = stoch_unfiltered * (stoch_unfiltered >= self.probabilty_threshold)
     normalization = jnp.sum(stoch_unnormalized, axis=-1, keepdims=True)
@@ -75,7 +75,7 @@ class DreamerModelGame():
     return stoch
 
 
-  def get_init_chance_outcomes(self, encoder_network: JointIsetEncoder):
+  def get_init_chance_outcomes(self):
     """The first stochastic state is special, since that 
      one requires the observation from the environment. Unroll for
      all possible observations (if the original game begins with a chance node)"""
@@ -91,7 +91,7 @@ class DreamerModelGame():
       observations = jnp.stack([p1_iset, p2_iset], axis=0)
       observations = observations[None, ...]
     get_init_stochs = nnx.vmap(self.get_init_stoch, in_axes=(None, 0), out_axes=0)
-    stochs = get_init_stochs(encoder_network, observations)
+    stochs = get_init_stochs(self.ma_rssm, observations)
     
     init_deters = []
     probs = []
@@ -139,64 +139,49 @@ class DreamerModelGame():
     return self.players
   
 
-  def cache_model_calls(self, world_model: DreamerMA):
+  def cache_model_calls(self):
     """Cache calls to the model networks for the given model.
     This is called on init automatically and should be called again when
     the model networks update"""
-    def dynamics_wrapper(dynamics_graphdef: nnx.GraphDef, dynamics_state: nnx.State, hidden_state: chex.Array):
-      dynamics_network = nnx.merge(dynamics_graphdef, dynamics_state)
-      return self.get_dynamics(dynamics_network, hidden_state)
-    dynamics_graphdef, dynamics_state = nnx.split(world_model.optimizers.dynamics_optimizer.model)
-    self.cached_dynamics = partial(dynamics_wrapper, dynamics_graphdef, dynamics_state)
-
-    def next_hidden_wrapper(sequence_graphdef: nnx.GraphDef, sequence_state: nnx.State, hidden_state: chex.Array, 
-                            deter_state: chex.Array, action: chex.Array):
-      sequence_network = nnx.merge(sequence_graphdef, sequence_state)
-      return world_model.get_next_hidden_no_jit(sequence_network, hidden_state, deter_state, action)
+    def predictors_wrapper(graphdef: nnx.GraphDef, state: nnx.State, 
+                        terminal_threshold: float, legal_threshold: float, recurrent_state:chex.Array,
+                        deter_state: chex.Array):
+      ma_rssm = nnx.merge(graphdef, state)
+      reward, terminal, legal = ma_rssm.get_predictor_no_jit(recurrent_state, deter_state, terminal_threshold, legal_threshold)
+      return reward, terminal, legal
     
-    sequence_graphdef, sequence_state = nnx.split(world_model.optimizers.sequence_optimizer.model)
-    self.cached_next_hidden = partial(next_hidden_wrapper, sequence_graphdef, sequence_state)
-
-    def predictor_wrapper(predictor_graphdef: nnx.GraphDef, legal_actions_graphdef: nnx.GraphDef,
-                          predictor_state: nnx.State, legal_actions_state: nnx.State,
-                          hidden_state: chex.Array, deter_state: chex.Array,
-                          terminal_threshold: float, legal_threshold: float):
-      predictor_network = nnx.merge(predictor_graphdef, predictor_state)
-      legal_actions_network = nnx.merge(legal_actions_graphdef, legal_actions_state)
-      return world_model.get_predictor_no_jit(predictor_network, legal_actions_network, hidden_state, deter_state, terminal_threshold, legal_threshold)
+    def next_recur_wrapper(graphdef: nnx.GraphDef, state: nnx.State, recurrent_state:chex.Array,
+                        deter_state: chex.Array, action: chex.Array):
+      ma_rssm = nnx.merge(graphdef, state)
+      next_recurrent = ma_rssm.get_next_recurrent_no_jit(recurrent_state, deter_state, action)
+      return next_recurrent
     
-    predictor_graphdef, predictor_state = nnx.split(world_model.optimizers.predictor_optimizer.model)
-    legal_actions_graphdef, legal_actions_state = nnx.split(world_model.optimizers.legal_actions_optimizer.model)
-    self.cached_predictor = partial(predictor_wrapper, predictor_graphdef, legal_actions_graphdef,
-                                               predictor_state, legal_actions_state)
-    self.get_init_chance_outcomes(world_model.optimizers.encoder_optimizer.model)
+    def dynamics_wrapper(graphdef: nnx.GraphDef, state: nnx.State, recurrent_state: chex.Array):
+      ma_rssm = nnx.merge(graphdef, state)
+      stoch_logits = ma_rssm.dyn(recurrent_state)
+      stoch_unfiltered = nnx.softmax(stoch_logits, axis=-1)
+      stoch_unnormalized = stoch_unfiltered * (stoch_unfiltered >= self.probabilty_threshold)
+      normalization = jnp.sum(stoch_unnormalized, axis=-1, keepdims=True)
+      normalization = normalization + (normalization == 0)
+      stoch = stoch_unnormalized / normalization
+      return stoch
 
+    ma_rssm_graphdef, ma_rssm_state = nnx.split(self.ma_rssm)
+    self.cached_predictor = partial(predictors_wrapper, ma_rssm_graphdef, ma_rssm_state, self.terminal_threshold, self.legal_threshold)
+    self.cached_dynamics = partial(dynamics_wrapper, ma_rssm_graphdef, ma_rssm_state)
+    self.cached_sequential = partial(next_recur_wrapper, ma_rssm_graphdef, ma_rssm_state)
 
-  
-  def get_dynamics(self, dynamics_network: DynamicsPredictor, hidden_state:chex.Array)->chex.Array:
-    """Gets a stochastic state from dynamics and also filters out the low probablity outcomes."""
-    stoch_logits = dynamics_network(hidden_state)
-    stoch_unfiltered = nnx.softmax(stoch_logits, axis=-1)
-    stoch_unnormalized = stoch_unfiltered * (stoch_unfiltered >= self.probabilty_threshold)
-    normalization = jnp.sum(stoch_unnormalized, axis=-1, keepdims=True)
-    normalization = normalization + (normalization == 0)
-    stoch = stoch_unnormalized / normalization
-    return stoch
-  
-  @partial(nnx.jit, static_argnums=0)
-  def get_next_hidden(self, sequential_network: SequenceModel, hidden_state: chex.Array, deter_state: chex.Array, action: chex.Array):
-    next_hidden = sequential_network(hidden_state, deter_state, action)
-    return next_hidden
-  
+    self.get_init_chance_outcomes()
+
 
   @partial(nnx.jit, static_argnums=0)
   def initialize_structures(self):
     """return init game state (chance node), init legals (dummy)"""
-    init_hidden = jnp.zeros(self.hidden_state_size)
+    init_recur = jnp.zeros(self.recurrent_state_size)
     init_deter = jnp.zeros((self.num_classes, self.num_categories), dtype=jnp.int8)
-    init_stoch = self.cached_dynamics(init_hidden)
+    init_stoch = self.cached_dynamics(init_recur)
     init_legals = jnp.ones((self.players, self.actions), dtype=jnp.int8)
-    init_state = ModelGameState(turn=0, hidden_state=init_hidden,
+    init_state = ModelGameState(turn=0, recurrent_state=init_recur,
                                  deter_state=init_deter,
                                  stoch_state=init_stoch)
     return init_state, init_legals
@@ -204,14 +189,14 @@ class DreamerModelGame():
   @partial(jax.jit, static_argnums=0)
   def get_info(self, game_state: ModelGameState):
     """return state_tensor, p1_iset, p2_iset, public_state
-    in our case, defining the model state as [hidden_state, deter_state]
+    in our case, defining the model state as [recurrent_state, deter_state]
     it is model_state, [model_state, one_hot(p1)], [model_state, one_hot(p2)], model_state.
     TODO: For IIG also put some sort of flag that instead returns the decoded
     isets as observations. Public state tensor from those two
     could not be gotten in a straightforward way though."""
 
     flat_deter = jnp.reshape(game_state.deter_state, (*game_state.deter_state.shape[:-2], -1))
-    model_state = jnp.concatenate([game_state.hidden_state, flat_deter], axis=0)
+    model_state = jnp.concatenate([game_state.recurrent_state, flat_deter], axis=0)
     
     p1_iset = jnp.concatenate([model_state, jax.nn.one_hot(0, self.players)], axis=0)
     p2_iset = jnp.concatenate([model_state, jax.nn.one_hot(1, self.players)], axis=0)
@@ -220,7 +205,7 @@ class DreamerModelGame():
   
 
   def state_tensor_shape(self)->int:
-    return self.hidden_state_size + self.deter_state_size
+    return self.recurrent_state_size + self.deter_state_size
   
   def public_state_tensor_shape(self)->int:
     return self.state_tensor_shape()
@@ -250,10 +235,9 @@ class DreamerModelGame():
     # We do not alter the hidden or stochastic states
     next_deter = next_deters[selected_outcome]
 
-    next_reward, next_terminal, next_legal = self.cached_predictor(game_state.hidden_state, next_deter,
-                                                                   self.terminal_threshold, self.legal_threshold)
+    _, next_reward, next_terminal, next_legal = self.cached_predictor(game_state.recurrent_state, next_deter)
     next_state = ModelGameState(turn=game_state.turn + 1,
-                                hidden_state=game_state.hidden_state,
+                                recurrent_state=game_state.recurrent_state,
                                 deter_state=next_deter,
                                 stoch_state=game_state.stoch_state)
     return next_state, next_terminal, next_reward, next_legal
@@ -263,7 +247,7 @@ class DreamerModelGame():
   @partial(jax.jit, static_argnums=(0))
   def apply_action_no_chance(self, game_state: ModelGameState, action: chex.Array):
     action_oh = jax.nn.one_hot(action, self.actions, axis=-1)
-    next_hidden = self.cached_next_hidden(game_state.hidden_state, game_state.deter_state, action_oh)
+    next_hidden = self.cached_sequential(game_state.recurrent_state, game_state.deter_state, action_oh)
     #The deterministic states are sampled at chance nodes
     next_deter = jnp.zeros_like(game_state.deter_state)
     next_stoch = self.cached_dynamics(next_hidden)
@@ -275,7 +259,7 @@ class DreamerModelGame():
     next_legals = jnp.ones((self.players, self.actions), dtype=jnp.int8)
 
     next_state = ModelGameState(turn = game_state.turn + 1,
-                                hidden_state= next_hidden,
+                                recurrent_state= next_hidden,
                                 deter_state= next_deter,
                                 stoch_state=next_stoch)
     return next_state, next_terminal, next_reward, next_legals

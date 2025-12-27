@@ -17,9 +17,9 @@ class PointCardMatchingState(GameState):
   played_cards: chex.Array
   #history of one hot point cards
   points: chex.Array
-  point_cards: chex.Array
+  point_card: chex.Array
   terminal: chex.Array
-  turn: int
+  turn: chex.Array
 
 
 class PointCardMatching(JaxGame):
@@ -35,12 +35,12 @@ class PointCardMatching(JaxGame):
   def initialize_structures(self):
     init_played_cards = jnp.zeros((self.max_turns, self.num_cards))
     init_points = jnp.zeros(1)
-    init_point_cards = jnp.concatenate([jax.nn.one_hot(self.num_cards - 1, self.num_cards)[None, ...], jnp.zeros((self.max_turns - 1, self.num_cards))], axis=0)
+    init_point_card = jax.nn.one_hot(self.num_cards - 1, self.num_cards)
     init_state = PointCardMatchingState(played_cards = init_played_cards,
                                         points = init_points,
-                                        point_cards = init_point_cards,
+                                        point_card = init_point_card,
                                         terminal = jnp.array(False),
-                                        turn = 0)
+                                        turn = jnp.array(0))
     init_legals = jnp.stack([jnp.ones((self.num_cards)), jax.nn.one_hot(0, self.num_cards)], axis=0)
     return init_state, init_legals
   
@@ -48,7 +48,7 @@ class PointCardMatching(JaxGame):
   def get_info(self, state: PointCardMatchingState):
     #starting at 0 points hence the + 1
     points_oh = jax.nn.one_hot(state.points, self.max_points + 1)
-    state_tensor = jnp.concatenate([state.played_cards.ravel(), state.point_cards.ravel(), points_oh.ravel()])
+    state_tensor = jnp.concatenate([state.played_cards.ravel(), state.point_card.ravel(), points_oh.ravel()])
     p1_iset = jnp.concatenate([jax.nn.one_hot(0, 2), state_tensor], axis=0)
     p2_iset = jnp.concatenate([jax.nn.one_hot(1, 2), state_tensor], axis=0)
     return state_tensor, p1_iset, p2_iset, state_tensor
@@ -78,7 +78,7 @@ class PointCardMatching(JaxGame):
     return self.information_state_tensor_shape()
   
   def state_tensor_shape(self):
-    return 2 * (self.max_turns * self.num_cards) + self.max_points + 1
+    return (self.max_turns * self.num_cards) + self.num_cards + self.max_points + 1
   
   def information_state_tensor_shape(self):
     return 2 + self.state_tensor_shape()
@@ -87,7 +87,6 @@ class PointCardMatching(JaxGame):
   @functools.partial(jax.jit, static_argnums=(0))
   def apply_action(self, state: PointCardMatchingState, action):
     turn_oh = jax.nn.one_hot(state.turn, self.max_turns)
-    point_card_turn_oh = jax.nn.one_hot(state.turn + 1, self.max_turns)
     #The second player is a dummy player
     action = action[0]
     action_oh = jax.nn.one_hot(action, self.num_cards)
@@ -97,14 +96,12 @@ class PointCardMatching(JaxGame):
     new_legals = jnp.ones(self.num_cards) - already_played
 
     #descending order
-    point_card = self.max_turns - state.turn - 2
+    point_card = self.num_cards - state.turn - 2
+    point_card_oh = jax.nn.one_hot(point_card, self.num_cards)
     #Match the action on the PREVIOUS point card
     new_points = state.points + (point_card + 1 == action)
 
-    point_card_oh = jax.nn.one_hot(point_card, self.num_cards)
-    new_point_cards = state.point_cards + (point_card_oh[None, ...] * point_card_turn_oh[..., None])
-
-    terminal = state.turn == (self.max_turns - 2)
+    terminal = state.turn == (self.num_cards - 2)
     terminal = state.terminal + terminal
     #new_point_cards = jnp.where(turn ==(self.max_turns - 1), state.point_cards, new_point_cards)
     #checking if we can still match the
@@ -115,7 +112,7 @@ class PointCardMatching(JaxGame):
     new_legals = jnp.stack([new_legals, jax.nn.one_hot(0, self.num_cards)], axis=0)
 
     new_state = PointCardMatchingState(played_cards=new_played_cards,
-                                       point_cards = new_point_cards,
+                                       point_card = point_card_oh,
                                        points= new_points,
                                        terminal = terminal,
                                        turn = state.turn + 1)
@@ -234,7 +231,7 @@ class PointCardMatchingStochastic(JaxGame):
     already_played = jnp.sum(chance_state.played_cards, axis=0)
     outcome_legals = jnp.ones((self.chance_outcomes, self.num_cards)) - already_played[None, ...]
 
-    stacked_state = jax.tree_util.tree_map(lambda x: jnp.tile(x[None, ...], (self.chance_outcomes,) + (1,) * len(x.shape)).astype(x.dtype), chance_state)
+    stacked_state = jax.tree.map(lambda x: jnp.tile(x[None, ...], (self.chance_outcomes,) + (1,) * len(x.shape)).astype(x.dtype), chance_state)
     #This returns an array of shape 
     #[self.chance_outcomes, self.max_turns, self.num_cards]
     # using broadcasting to mask the oh_card into the proper turn as well as 

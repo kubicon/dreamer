@@ -15,7 +15,7 @@ class RPSSTate(GameState):
 
 class JaxRPS(JaxGame):
   def __init__(self) -> None:
-    self.max_turns = 2 # Including the terminal state
+    self.max_turns = 2 # Decision node, terminal state
     self.moves = {"r" : 0, "p": 1, "s": 2}
     # p1 wins: pr: 1, sp, 1, rs -2
     # p1 loses : rp: -1, ps: -1, sr: 2
@@ -38,7 +38,7 @@ class JaxRPS(JaxGame):
     return self.information_state_tensor_shape() - 2
    
   def information_state_tensor_shape(self):
-    return 7 # 2 for player encoding, 2 for the terminal flag, 3 for player 1 points
+    return 8 # 2 for player encoding, 2 for the terminal flag, 4 for player 1 points
     # this is just the observation tensor of the current state, but because the game is only a single turn, it corresponds
     # to the perfect recall iset 
 
@@ -46,19 +46,19 @@ class JaxRPS(JaxGame):
     return self.information_state_tensor_shape()
   
   def public_state_tensor_shape(self):
-    return self.state_tensor_shape
+    return self.state_tensor_shape()
   
   def num_distinct_actions(self):
     return self.actions
   
   def max_trajectory_length(self):
-    return self.max_turns - 1
+    return self.max_turns
   
   
   @functools.partial(jax.jit, static_argnums=(0))
   def initialize_structures(self):
     game_state = RPSSTate(terminal = jnp.array(False, dtype=bool),
-                          p1_points = jnp.array(0))
+                          p1_points = jnp.array(-2))
     return game_state, jnp.ones((2, self.actions))
 
   
@@ -68,9 +68,8 @@ class JaxRPS(JaxGame):
   # of the initial state will not play a role
   @functools.partial(jax.jit, static_argnums=(0,))
   def get_info(self, game_state:RPSSTate):
-    # Taking advantage of -1 being encoded as all zeros
-    terminal_oh = jax.nn.one_hot(game_state.terminal, 2) 
-    p1_points_oh = jax.nn.one_hot(game_state.p1_points + 1, 3)
+    terminal_oh = jax.nn.one_hot(game_state.terminal.astype(int), 2) 
+    p1_points_oh = jax.nn.one_hot(game_state.p1_points + 2, 4)
     state_tensor = jnp.concatenate([terminal_oh.ravel(), p1_points_oh.ravel()], axis=0)
     p1_iset_tensor = jnp.concatenate([jax.nn.one_hot(0, 2), state_tensor], axis=0)
     p2_iset_tensor = jnp.concatenate([jax.nn.one_hot(1, 2), state_tensor], axis=0)

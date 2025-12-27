@@ -7,43 +7,50 @@ from functools import partial
 
 
 
-from train_utils import DreamerMAConfig, TimeStep, get_loss_mean_with_mask, PredictionStepWithLegal, symexp, save_model
+from train_utils import *
 from distributions import get_normal_log_prob, get_bin_log_prob, kl_divergence, sample_categorical, add_uniform_mix
-from networks import *
+from ma_rssm import *
 from replay_buffer import ReplayBuffer
+from dreamer_actor_critic import DreamerActorCritic
+from rnad_dreamer import RNaDDreamer
 
-
-@chex.dataclass(frozen=True)
-class DreamerMAGradients():
-  sequence: nnx.State
-  encoder: nnx.State
-  p1_decoder: nnx.State
-  p2_decoder: nnx.State
-  dynamics: nnx.State
-  predictor: nnx.State
-  legal_predictor: nnx.State
 
 
 class DreamerMA():
-  def __init__(self, config: DreamerMAConfig, buffer: ReplayBuffer):
-    """The actual model that handles the dreamer algorithm training.
-    For now only the world model networks are used and actor/critic networks are not trained."""
-    self.config = config
-    self.game = buffer.game
-    self.buffer = buffer
+  def __init__(self, config: DreamerMAConfig, buffer_config: BufferConfig,
+               ac_config:RNaDConfig| ActorCriticConfig, opt_config: OptimizerConfig
+               , game: JaxGame, seed:int):
+    """The complete model handling Dreamer world model and actor/critic training
+
+    Args:
+        config (DreamerMAConfig): Configuration for the world model
+        ac_config (RNaDConfig | ActorCriticConfig): Configuration for the actor-critic algorithm. Either RNaD, or standard Dreamer Reinforce with TD(lambda) estimate
+        opt_config (OptimizerConfig): Configuration for the optimizer
+        buffer (ReplayBuffer): The replay buffer sampling from the environment
+        seed (int): RNG seed for the whole algorithm. Shared for world-model and actor-critic
+    """
+    self.wm_config = config
+    self.ac_config = ac_config
+    self.opt_config = opt_config
+    self.buffer_config = buffer_config
+    self.init_seed = seed
+    self.game = game
     self.init()
     
     
   def init(self):
-    self.jax_rngs = jax.random.key(self.config.rng_seed)
-    self.nnx_rngs = nnx.Rngs(self.generate_key())
+    self.jax_rngs = jax.random.key(self.init_seed)
+
+    self.buffer= ReplayBuffer(self.game, self.buffer_config, self.wm_config, self.init_seed, self.ac_config.state_sample_threshold)
     
-    
-    self.optimizers = initialize_ma_dreamer_optimizers(self.config, self.game, self.nnx_rngs)
-    hidden_state_size = self.config.sequential_network_details[0]
-    if hidden_state_size < 1:
-      hidden_state_size = self.game.num_players() * self.game.information_state_tensor_shape()
-    self.hidden_state_size = hidden_state_size
+    recurrent_state_size = self.wm_config.sequential_network_details[0]
+    if recurrent_state_size < 1:
+      recurrent_state_size = self.game.num_players() * self.game.information_state_tensor_shape()
+    self.recurrent_state_size = recurrent_state_size
+
+    rngs = nnx.Rngs(jax.random.key(self.init_seed))
+    self.optimizer= create_dreamer_optimizer(self.game, self.wm_config, self.ac_config, self.opt_config, rngs)
+    ma_rssm = self.optimizer.model
     self.learner_steps = 0
     
     #Assuming that this contains a terminal state as well
@@ -52,30 +59,37 @@ class DreamerMA():
 
 
     self.action_dimension = self.game.num_distinct_actions()
+    self.infoset_size = ma_rssm.infoset_size
     assert self.game.num_players() > 1, f"This implementation of Dreamer assumes a game with at least 2 players not {self.game.num_players()}"
+    use_rnad = ma_rssm.use_rnad
+    self.use_rnad = use_rnad
+    #Vanilla SGD coupled with the gradients
+    # we compute manually in actor critic will handle
+    # the EMA updates for us.
+    target_tx = optax.sgd(self.ac_config.target_network_update)
+    if use_rnad:
+      target_optimizer = nnx.Optimizer(model= RNaDNetwork(self.infoset_size,
+                                                          self.action_dimension,
+                                                          self.ac_config.bin_range,
+                                                          self.ac_config.rnad_network_details[0],
+                                                          self.ac_config.rnad_network_details[1],
+                                                          rngs=rngs
+                                                          ), tx=target_tx)
+      ctor = RNaDDreamer
+    else:
+      target_optimizer = nnx.Optimizer(model=CriticNetwork(self.infoset_size,
+                                                           self.ac_config.bin_range,
+                                                           self.ac_config.critic_network_details[0],
+                                                           self.ac_config.critic_network_details[1],
+                                                           rngs=rngs),
+                                                           tx = target_tx)
+      ctor = DreamerActorCritic
+    self.actor_critic = ctor(self.game, self.ac_config, self.optimizer, target_optimizer)
+    #self.wm_cached_train = nnx.cached_partial(self.update_world_model, self.optimizer)
+    policy_network = ma_rssm.actor_critic if ma_rssm.use_rnad else ma_rssm.actor
+    #Also cache the sampling for the buffer
+    self.buffer.cache_sampling(ma_rssm.seq, ma_rssm.enc, ma_rssm.observer, policy_network)
     
-    self._get_example_timestep()
-    self.cached_train = nnx.cached_partial(self.world_model_train, self.optimizers)
-    
-  
-  def _get_example_timestep(self):
-    #This can produce a chance node, but that 
-    # one by default produces invalid isets
-    # and legals so it is not a problem 
-    example_state, example_legals = self.game.initialize_structures()
-    _, ex_p1_iset, ex_p2_iset, _ = self.game.get_info(example_state)
-    ex_obs = jnp.stack([ex_p1_iset, ex_p2_iset], axis=0)
-    legal = jnp.ones_like(example_legals)
-    action = jax.nn.one_hot(jnp.argmax(legal, -1), legal.shape[-1]) 
-    policy = legal.astype(float) / jnp.sum(legal, axis=-1, keepdims=True)
-    self.example_timestep = TimeStep(
-                                    obs= ex_obs,
-                                    action=action,
-                                    legal=legal,
-                                    policy = policy,
-                                    reward = 0.0,
-                                    terminal = False,
-                                    valid = False)
   
   def generate_key(self):
     self.jax_rngs, key = jax.random.split(self.jax_rngs)
@@ -87,34 +101,33 @@ class DreamerMA():
     return keys
     
   
-  def update_world_model(self, optimizers: DreamerMAOptimizers, timestep: TimeStep, rng_key):
+  @partial(nnx.jit, static_argnums=(0))
+  def update_world_model(self, optimizer: nnx.Optimizer, timestep: TimeStep, rng_key):
     """Compound loss for the entire world model."""
-    sample_keys = jax.random.split(rng_key, self.non_chance_trajectory_max * self.config.batch_size)
-    sample_keys = sample_keys.reshape((self.non_chance_trajectory_max, self.config.batch_size))
+    sample_keys = jax.random.split(rng_key, self.non_chance_trajectory_max * self.wm_config.batch_size)
+    sample_keys = sample_keys.reshape((self.non_chance_trajectory_max, self.wm_config.batch_size))
     
-    def world_model_loss(sequence_model: SequenceModel, encoder: JointIsetEncoder, 
-                         p1_decoder: IsetDecoder, p2_decoder: IsetDecoder, 
-                         dynamics_model: DynamicsPredictor, predictor: Predictor,
-                         legal_actions_network: LegalActionsNetwork):
+    def world_model_loss(ma_rssm: MARSSM):
       l_pred, l_dyn, l_rep = 0, 0, 0
       #[Trajectory, Batch, ...]
-      @nnx.scan(in_axes=(nnx.Carry, 0, None, None, None, None, None, None, None), out_axes=(nnx.Carry, 0))
-      def _predict_over_timestep(hidden_state, xs, sequence_model, encoder, p1_decoder, p2_decoder, dynamics_model, predictor, legal_network):
+      @nnx.scan(in_axes=(nnx.Carry, 0, None), out_axes=(nnx.Carry, 0))
+      def _predict_over_timestep(recurrent_state, xs, model: MARSSM):
         
         action, obs, cur_key = xs
-        stochastic_state = encoder(hidden_state, obs)
-        stochastic_state = add_uniform_mix(stochastic_state, self.config.uniform_mix)
+        tokens = model.enc(obs)
+        stochastic_state = model.observer(recurrent_state, tokens)
+        stochastic_state = add_uniform_mix(stochastic_state, self.wm_config.uniform_mix)
         deterministic_state = sample_categorical(stochastic_state, cur_key)
-        prior_stochastic_state = dynamics_model(hidden_state)
-        prior_stochastic_state = add_uniform_mix(prior_stochastic_state, self.config.uniform_mix)
-        reward, done = predictor(hidden_state, deterministic_state)
-        legal = legal_network(hidden_state, deterministic_state)
-        decoded_p1_obs = p1_decoder(hidden_state, deterministic_state)
-        decoded_p2_obs = p2_decoder(hidden_state, deterministic_state)
+        prior_stochastic_state = model.dyn(recurrent_state)
+        prior_stochastic_state = add_uniform_mix(prior_stochastic_state, self.wm_config.uniform_mix)
+        reward, done = model.rew(recurrent_state, deterministic_state), model.term(recurrent_state, deterministic_state)
+        legal = model.leg(recurrent_state, deterministic_state)
+        decoded_p1_obs = model.p1_dec(recurrent_state, deterministic_state)
+        decoded_p2_obs = model.p2_dec(recurrent_state, deterministic_state)
         decoded_obs = jnp.stack([decoded_p1_obs, decoded_p2_obs], axis=0)
-        new_hidden = sequence_model(hidden_state, deterministic_state, action)
+        new_hidden = model.seq(recurrent_state, deterministic_state, action)
         preds = PredictionStepWithLegal(
-                                hidden_state = hidden_state,
+                                recurrent_state = recurrent_state,
                                 repr_state = stochastic_state,
                                 deter_state = deterministic_state,
                                 decoded_obs = decoded_obs,
@@ -126,12 +139,12 @@ class DreamerMA():
         return new_hidden, preds
       
       xs = (timestep.action, timestep.obs, sample_keys)
-      init_hidden = jnp.zeros((self.config.batch_size, self.hidden_state_size)) 
-      vectorized_predict = nnx.vmap(_predict_over_timestep, in_axes=(0, 1, None, None, None, None, None, None, None), out_axes=(0, 1))
-      _, predictions = vectorized_predict(init_hidden, xs, sequence_model, encoder, p1_decoder, p2_decoder, dynamics_model, predictor, legal_actions_network) 
+      init_hidden = ma_rssm.get_init_recurrent(self.wm_config.batch_size)
+      vectorized_predict = nnx.vmap(_predict_over_timestep, in_axes=(0, 1, None), out_axes=(0, 1))
+      _, predictions = vectorized_predict(init_hidden, xs, ma_rssm) 
 
       #[Trajectory, Batch, num_players, obs_size]
-      reconstruction_loss = -get_normal_log_prob(predictions.decoded_obs, timestep.obs)
+      reconstruction_loss = -get_normal_log_prob(predictions.decoded_obs, timestep.obs, use_symlog=True)
       l_pred += get_loss_mean_with_mask(reconstruction_loss, timestep.valid[..., None, None])
       #[Trajectory, Batch, 1]
       #continuation_loss = -get_normal_log_prob(predictions.done_logit, timestep.terminal.astype(jnp.int16))
@@ -142,7 +155,7 @@ class DreamerMA():
       #Legal actions should not be trained in terminal states, as there are no legal actions there
       l_pred += get_loss_mean_with_mask(legal_loss, ~timestep.terminal[..., None, None])
       #[Trajectory, Batch, 2* bin_range + 1]
-      bins = jnp.arange((2 * self.config.bin_range) + 1) - self.config.bin_range
+      bins = jnp.arange((2 * self.wm_config.bin_range) + 1) - self.wm_config.bin_range
       reward_loss = -get_bin_log_prob(predictions.reward_dist_logit, bins, timestep.reward, use_symlog=True)
       #[Trajectory, Batch, 1]
       #reward_loss = -get_normal_log_prob(timestep.reward, timestep.reward)
@@ -155,175 +168,88 @@ class DreamerMA():
       prior = nnx.softmax(predictions.dynamics_state, axis=-1)
       #[Trajectory, Batch]
       dynamics_loss = kl_divergence(jax.lax.stop_gradient(posterior), prior)
-      l_dyn += jnp.maximum(self.config.free_bits_clip_threshold, get_loss_mean_with_mask(dynamics_loss, timestep.valid))
+      l_dyn += jnp.maximum(self.wm_config.free_bits_clip_threshold, get_loss_mean_with_mask(dynamics_loss, timestep.valid))
       #[Trajectory, Batch]
       repr_loss = kl_divergence(posterior, jax.lax.stop_gradient(prior))
-      l_rep += jnp.maximum(self.config.free_bits_clip_threshold, get_loss_mean_with_mask(repr_loss, timestep.valid))
-
-      # jax.debug.breakpoint()
+      l_rep += jnp.maximum(self.wm_config.free_bits_clip_threshold, get_loss_mean_with_mask(repr_loss, timestep.valid))
       
-      return self.config.beta_prediction * l_pred + self.config.beta_dynamics * l_dyn + self.config.beta_representation * l_rep, predictions
+      return self.wm_config.beta_prediction * l_pred + self.wm_config.beta_dynamics * l_dyn + self.wm_config.beta_representation * l_rep, predictions
   
-    func_data, grad = nnx.value_and_grad(world_model_loss, has_aux=True, argnums=(0, 1, 2, 3, 4, 5, 6))(
-                    optimizers.sequence_optimizer.model, 
-                    optimizers.encoder_optimizer.model, 
-                    optimizers.p1_decoder_optimizer.model, 
-                    optimizers.p2_decoder_optimizer.model, 
-                    optimizers.dynamics_optimizer.model, 
-                    optimizers.predictor_optimizer.model,
-                    optimizers.legal_actions_optimizer.model)
+    func_data, grad = nnx.value_and_grad(world_model_loss, has_aux=True, argnums=(0))(
+                    optimizer.model)
     
     loss, pred_step = func_data
-    optimizers.sequence_optimizer.update(grad[0])
-    optimizers.encoder_optimizer.update(grad[1])
-    optimizers.p1_decoder_optimizer.update(grad[2])
-    optimizers.p2_decoder_optimizer.update(grad[3])
-    optimizers.dynamics_optimizer.update(grad[4])
-    optimizers.predictor_optimizer.update(grad[5])
-    optimizers.legal_actions_optimizer.update(grad[6])
+    optimizer.update(grad)
     
-    return loss, pred_step
-  
-
-  @partial(nnx.jit, static_argnums=(0))
-  def update_optimizers_with_grads(self, optimizers: DreamerMAOptimizers, grad: DreamerMAGradients):
-    """Update the world model with the computed grad dictionary.
-    """
-    optimizers.sequence_optimizer.update(grad.sequence)
-    optimizers.encoder_optimizer.update(grad.encoder)
-    optimizers.p1_decoder_optimizer.update(grad.p1_decoder)
-    optimizers.p2_decoder_optimizer.update(grad.p2_decoder)
-    optimizers.dynamics_optimizer.update(grad.dynamics)
-    optimizers.predictor_optimizer.update(grad.predictor)
-    optimizers.legal_actions_optimizer.update(grad.legal_predictor) 
-  
-  
-  # Unlike flax.linen, nnx.jit allows updating the model itself.
-  @partial(nnx.jit, static_argnums=(0))
-  def world_model_train(self, optimizers, timestep: TimeStep, rng_key):
-    loss, pred_step = self.update_world_model(optimizers,timestep, rng_key)
-    #Returns loss and the starting points in the trajectory.
-    # This is required for the joint training. 
     return loss, pred_step
     
 
-  def world_model_train_step(self):
-    rng_key = self.generate_key()
-    timestep = self.buffer.mixed_sample()
-    loss, pred_step = self.cached_train(timestep, rng_key)
-    #loss, pred_step = self.world_model_train(self.optimizers, timestep, rng_key)
+  def train_step(self):
+    buffer_key = self.generate_key()
+    timestep = self.buffer.mixed_sample(buffer_key)
+    wm_key = self.generate_key()
+    #wm_loss, pred_step = self.wm_cached_train(timestep, wm_key)
+    wm_loss, pred_step = self.update_world_model(self.optimizer, timestep, wm_key)
+    ac_key = self.generate_key()
+    ac_img_loss, ac_real_loss = self.actor_critic.step(timestep, pred_step, ac_key)
     self.learner_steps += 1
-    return loss, timestep, pred_step
+    return wm_loss, ac_img_loss, ac_real_loss
 
-  def train_world_model(self, model_save_dir:str, num_steps:int, print_each: int = -1, save_each: int = -1):
+  def train_model(self, model_save_dir:str, num_steps:int, print_each: int = -1, save_each: int = -1, save_first: bool = False):
+    if save_first:
+      model_file = model_save_dir + f"step_{self.learner_steps}.pkl"
+      save_model(self, model_file)
     #Start the training by sampling into the buffer,
     # to ensure that there are distinct data for at least one step
-    self.buffer.add_batch(self.config.batch_size)
+    init_batch_key = self.generate_key()
+    self.buffer.add_batch(self.wm_config.batch_size, init_batch_key)
     for i in range(num_steps):
-      rng_key = self.generate_key()
-      timestep = self.buffer.sample_batch(self.config.batch_size) 
-      loss, pred_step = self.cached_train(timestep, rng_key)
-      if print_each > 0 and i % print_each == 0:
-        print(f"Step {i}, Loss: {loss}")
-      if save_each > 0 and i % save_each == 0:
-        model_file = model_save_dir + f"step_{i}.pkl"
+      wm_loss, ac_img_loss, ac_real_loss = self.train_step()
+      if print_each > 0 and self.learner_steps % print_each == 0:
+        print(f"Step {self.learner_steps}, World model loss: {wm_loss}, Actor critic losses: img: {ac_img_loss} real: {ac_real_loss}")
+      if save_each > 0 and self.learner_steps % save_each == 0:
+        model_file = model_save_dir + f"step_{self.learner_steps}.pkl"
         save_model(self, model_file)
-      self.learner_steps += 1
    
   def __getstate__(self):
-    return {
-      "config": self.config,
-      "buffer": self.buffer,
-      "jax_rngs": self.jax_rngs,
-      "optimizers": nnx.state(self.optimizers),
-      "steps": self.learner_steps
-    }
     
-
-  def update_nnx(self, model_state, saved_state):
-    static_graph, _ = nnx.split(model_state)
-    new_model_state = nnx.merge(static_graph, saved_state)
-    return new_model_state
+    state = {}
+    general_state = {
+      'wm_config': self.wm_config,
+      'ac_config': self.ac_config,
+      'opt_config': self.opt_config,
+      'buffer_config': self.buffer_config,
+      'init_seed': self.init_seed,
+      'game': self.game,
+      'jax_rngs': self.jax_rngs,
+      'optimizer': nnx.state(self.optimizer),
+      'steps': self.learner_steps
+    }
+    state['gen'] = general_state
+    actor_critic_state = self.actor_critic.getstate()
+    state['ac'] = actor_critic_state
+    buffer_state = self.buffer.getstate()
+    state['buffer'] = buffer_state
+    return state
+    
   
   def __setstate__(self, state):
-    self.config = state["config"]
-    self.buffer = state["buffer"]
-    self.game = self.buffer.game
-    
+    gen_state = state['gen']
+    self.wm_config = gen_state['wm_config']
+    self.ac_config = gen_state['ac_config']
+    self.opt_config = gen_state['opt_config']
+    self.buffer_config = gen_state['buffer_config']
+    self.init_seed = gen_state['init_seed']
+    self.game = gen_state['game']
     self.init()
     
-    self.jax_rngs = state["jax_rngs"]
-    self.optimizers = self.update_nnx(self.optimizers, state["optimizers"])
-    self.learner_steps = state["steps"]
-    #Necessary for continuing to train. Otherwise it will continue to train on
-    # the newly initialized parameters
-    self.cached_train = nnx.cached_partial(self.world_model_train, self.optimizers)
+    
+    self.jax_rngs = gen_state["jax_rngs"]
+    nnx.update(self.optimizer, gen_state["optimizer"])
+    self.learner_steps = gen_state["steps"]
+    self.actor_critic.setstate(state['ac'])
+    self.buffer.setstate(state['buffer'])
+    
 
-  @partial(nnx.jit, static_argnums=(0, 5, 6))
-  def get_predictor(self, predictor_model: Predictor, legal_model: LegalActionsNetwork, 
-                    hidden_state: chex.Array, deterministic_state:chex.Array, terminal_threshold: float = 0.5, legal_threshold: float = 0.5):
-    """Calls the predictor and legal actions networks and 
-    passes the reward, done logits and legal action logits through
-    appropriate transformations to return the actual values"""
-    return self.get_predictor_no_jit(predictor_model, legal_model, hidden_state, deterministic_state,
-                                     terminal_threshold, legal_threshold)
-  
-  def get_predictor_no_jit(self, predictor_model: Predictor, legal_model: LegalActionsNetwork, 
-                    hidden_state: chex.Array, deterministic_state:chex.Array, terminal_threshold: float = 0.5, legal_threshold: float = 0.5):
-    """Calls the predictor and legal actions networks and 
-    passes the reward, done logits and legal action logits through
-    appropriate transformations to return the actual values"""
-    #[2* bin_range + 1], [1]
-    reward_bin_logits, done_logit = predictor_model(hidden_state, deterministic_state)
-    legal_logit = legal_model(hidden_state, deterministic_state)
-    #Implementing the summation order suggestion
-    # from https://arxiv.org/pdf/2301.04104 page 18
-    bins = jnp.arange((2 * self.config.bin_range) + 1) - self.config.bin_range
-    reward_probs = nnx.softmax(reward_bin_logits)
-    pos_bins = bins * (bins >= 0)
-    # flip the probs and bins for the negative
-    # to ensure summation from small to large in magnitude 
-    neg_bins = bins * (bins < 0)
-    reward_pos_part = jnp.sum(reward_probs * pos_bins)
-    reward_neg_part = jnp.sum(jnp.flip(reward_probs * neg_bins))
-    reward = reward_pos_part + reward_neg_part
-    #reward = jnp.sum(reward_probs * bins)
-    reward = symexp(reward)
-    #reward_untransformed, done_logit = predictor_model(hidden_state, deterministic_state)
-    #reward = reward_untransformed
-    done_prob = nnx.sigmoid(done_logit)
-    terminal = done_prob >= terminal_threshold
-    legal_prob = nnx.sigmoid(legal_logit)
-    legal_actions = (legal_prob >= legal_threshold).astype(jnp.int8)
-    return reward, terminal[0], legal_actions
-  
-  @partial(nnx.jit, static_argnums=(0))
-  def get_decoder(self, decoder_model: IsetDecoder, hidden_state: chex.Array, deterministic_state: chex.Array):
-    """Calls the decoder network and 
-    applies the appropriate transformation to its output.
-    Outputs either predicted real observation in single agent setting, or 
-    predicted iset for a single player in a multi agent setting. """
-    decoder_output_untransformed = decoder_model(hidden_state, deterministic_state)
-    #decoder_output = symexp(decoder_output_untransformed)
-    decoder_output = decoder_output_untransformed
-    return decoder_output
-  
-  @partial(nnx.jit, static_argnums=(0))
-  def get_dynamics(self, dynamics_model: DynamicsPredictor, hidden_state:chex.Array):
-    return dynamics_model(hidden_state)
-  
-  @partial(nnx.jit, static_argnums=(0))
-  def get_encoder(self, encoder_model:JointIsetEncoder, hidden_state:chex.Array, obs: chex.Array):
-    return encoder_model(hidden_state, obs)
-  
-  def get_encoder_no_jit(self, encoder_model:JointIsetEncoder, hidden_state:chex.Array, obs: chex.Array):
-    return encoder_model(hidden_state, obs)
-  
-  @partial(nnx.jit, static_argnums=(0))
-  def get_next_hidden(self, sequence_model:SequenceModel, hidden_state:chex.Array, deterministic_state:chex.Array, joint_action:chex.Array):
-    return sequence_model(hidden_state, deterministic_state, joint_action)
-  
-  def get_next_hidden_no_jit(self, sequence_model:SequenceModel, hidden_state:chex.Array, deterministic_state:chex.Array, joint_action:chex.Array):
-    return sequence_model(hidden_state, deterministic_state, joint_action)
     
     

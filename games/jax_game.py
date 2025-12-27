@@ -63,8 +63,8 @@ class JaxGame(ABC):
     post chance node states.
     Returns invalid output if the state is not a chance node."""
     if self.num_players() == 1:
-      return jnp.zeros(1), jnp.zeros(1)
-    return jnp.zeros((1, self.num_players())), jnp.zeros(1)
+      return jnp.zeros(1, dtype=jnp.int32), jnp.zeros(1)
+    return jnp.zeros((1, self.num_players()), dtype=jnp.int32), jnp.zeros(1)
 
   def get_outcomes_and_probs_with_check(self, game_state:GameState) ->tuple[chex.Array, chex.Array]:
     """Gets all chance outcomes and their respective probabilities

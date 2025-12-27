@@ -86,7 +86,7 @@ def render_tree(root: Node, model: DreamerMA):
     empty = ""
     game_params = game.params_dict()
     params_str = f'{empty.join(f"_{value}" for key, value in game_params.items())}'
-    tree_save_dir = f"game_trees/{game_name}{params_str}/seed{model.config.seed}/network_seed{model.config.rng_seed}/"
+    tree_save_dir = f"game_trees/{game_name}{params_str}/seed{model.init_seed}/"
     tree_save_dir = os.getcwd() + "/" +  tree_save_dir
     os.makedirs(tree_save_dir, exist_ok=True)
 

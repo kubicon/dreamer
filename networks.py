@@ -1,27 +1,12 @@
 
 import chex
-import jax
 from flax import nnx
 import jax.numpy as jnp
-from train_utils import DreamerConfig, DreamerMAConfig, RNaDConfig, ActorCriticConfig
-import optax
-from games.jax_game import JaxGame
+
+
 
 from train_utils import legal_policy, legal_log_policy
 
-
-# #Implementing the summation order suggestion
-#     # from https://arxiv.org/pdf/2301.04104 page 18
-#     bins = jnp.arange((2 * self.config.bin_range) + 1) - self.config.bin_range
-#     v_probs = nnx.softmax(v_dist_logits)
-#     pos_bins = bins * (bins >= 0)
-#     # flip the probs and bins for the negative
-#     # to ensure summation from small to large in magnitude 
-#     neg_bins = bins * (bins < 0)
-#     v_pos_part = jnp.sum(v_probs * pos_bins)
-#     v_neg_part = jnp.sum(jnp.flip(v_probs * neg_bins))
-#     v = v_pos_part + v_neg_part
-#     v = symexp(v)
 
 class LinNormRelu(nnx.Module):
   def __init__(self, in_features, out_features,rngs: nnx.Rngs):
@@ -60,7 +45,6 @@ class HiddenMLP(nnx.Module):
     return forward_hidden(x, self.hidden_layers)
 
 
-# TODO: Do we want to send legal in? This forces us to train legal actions network
 class RNaDNetwork(nnx.Module):
   """The RNaD algorithm network, with policy and value heads.
   Receive current iset and legal actions mask and return
@@ -93,7 +77,7 @@ class ActorNetwork(nnx.Module):
   The input to the network is infoset for IIGs, or
   [sampled_model_state, recurrent_state] for PIGs or POMPDPs.
   Thus, input features are either the dimension of infoset
-  or (num_classes * num_categoricals) + hidden_state_size"""
+  or (num_classes * num_categoricals) + recurrent_state_size"""
   def __init__(self, input_features, action_features, hidden_features, num_layers, rngs:nnx.Rngs):
     self.init_layer = LinNormRelu(input_features, hidden_features, rngs)
     self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
@@ -114,7 +98,7 @@ class CriticNetwork(nnx.Module):
   The input to the network is infoset for IIGs, or
   [sampled_model_state, recurrent_state] for PIGs or POMPDPs.
   Thus, input features are either the dimension of infoset
-  or (num_classes * num_categoricals) + hidden_state_size
+  or (num_classes * num_categoricals) + recurrent_state_size
   Return
   the logits of categorical distribution of value of the 
   current infoset/state, that is defined over the 
@@ -139,111 +123,111 @@ class SequenceModel(nnx.Module):
   '''
   def __init__(self, encoded_classes, encoded_categories, action_features, num_players,
                linear_hidden_features: int, linear_hidden_layers: int,
-               hidden_state_size, rngs: nnx.Rngs):
+               recurrent_state_size, rngs: nnx.Rngs):
     self.multi_player = int(num_players > 1)
-    self.hidden_init = LinNormRelu(hidden_state_size, linear_hidden_features, rngs=rngs)
+    self.hidden_init = LinNormRelu(recurrent_state_size, linear_hidden_features, rngs=rngs)
     self.action_init = LinNormRelu((action_features * num_players), linear_hidden_features, rngs=rngs)
     self.deter_init = LinNormRelu(encoded_classes * encoded_categories, linear_hidden_features, rngs=rngs)
     self.core_mlp = HiddenMLP(3 * linear_hidden_features, num_layers= 3 * linear_hidden_layers, rngs=rngs)
-    self.gru_cell = nnx.GRUCell(3 * linear_hidden_features, hidden_state_size, gate_fn=nnx.silu, rngs=rngs) 
+    self.gru_cell = nnx.GRUCell(3 * linear_hidden_features, recurrent_state_size, gate_fn=nnx.silu, rngs=rngs) 
     
-  def __call__(self, hidden_state: chex.Array, deter_state: chex.Array, action:chex.Array):
+  def __call__(self, recurrent_state: chex.Array, deter_state: chex.Array, action:chex.Array):
     """Ensure that action is already one hot encoded. Deter state is the 
     already sampled state out of stochastic state"""
     flat_deter = jnp.reshape(deter_state, (*deter_state.shape[:-2], -1))
     #If we have multi-player, we need to flatten the last two dimensions
     stop_at = -1 -self.multi_player
     flat_action = jnp.reshape(action, (*action.shape[:stop_at], -1))
-    x0 = self.hidden_init(hidden_state)
+    x0 = self.hidden_init(recurrent_state)
     x1 = self.deter_init(flat_deter)
     x2 = self.action_init(flat_action)
     x = jnp.concatenate([x0, x1, x2], axis=-1)
-    new_hidden_state, _ = self.gru_cell(hidden_state, x)
-    return new_hidden_state
+    new_recurrent_state, _ = self.gru_cell(recurrent_state, x)
+    return new_recurrent_state
   
 
 class Encoder(nnx.Module):
   """Recieve an observation from the environment,
-  return logits of current stochastic latent state."""
-  def __init__(self, hidden_state_size, observation_features, encoded_classes, encoded_categories, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
-    self.encoded_classes = encoded_classes
-    self.encoded_categories = encoded_categories
-    self.init_layer = LinNormRelu(hidden_state_size + observation_features, hidden_features, rngs)
+  return a latent feature vector that, along with the current
+  recurrent state, will be used to produce current deterministic state"""
+  def __init__(self, observation_features, tokens_features, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
+    self.init_layer = LinNormRelu(observation_features, hidden_features, rngs)
     self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
-    self.last_layer = nnx.Linear(hidden_features, encoded_classes * encoded_categories, rngs=rngs)
+    self.last_layer = nnx.Linear(hidden_features, tokens_features, rngs=rngs)
     
-  def __call__(self, hidden_state: chex.Array, observation: chex.Array):
-    x = jnp.concatenate([hidden_state, observation], axis=-1)
-    x = self.init_layer(x)
+  def __call__(self, observation: chex.Array):
+    x = self.init_layer(observation)
     x = self.core_mlp(x)
-    x = self.last_layer(x)
-    encoded_state = x.reshape(*x.shape[:-1], self.encoded_classes, self.encoded_categories)
-    return encoded_state
+    tokens = self.last_layer(x)
+    return tokens
 
 class JointIsetEncoder(nnx.Module):
   """Recieve a joint infoset from the environment,
-  return logits of current stochastic latent state."""
-  def __init__(self, hidden_state_size, iset_features, num_players, encoded_classes, encoded_categories, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
-    self.encoded_classes = encoded_classes
-    self.encoded_categories = encoded_categories
-    self.init_layer = LinNormRelu(hidden_state_size + (iset_features * num_players), hidden_features, rngs)
+  return a latent feature vector that, along with the current
+  recurrent state, will be used to produce current deterministic state."""
+  def __init__(self, iset_features, num_players, tokens_features, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
+
+    self.init_layer = LinNormRelu(iset_features * num_players, hidden_features, rngs)
     self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
-    self.last_layer = nnx.Linear(hidden_features, encoded_classes * encoded_categories, rngs=rngs)
+    self.last_layer = nnx.Linear(hidden_features, tokens_features, rngs=rngs)
     
-  def __call__(self, hidden_state: chex.Array, joint_iset: chex.Array):
-    x = jnp.concatenate([hidden_state, jnp.reshape(joint_iset, (*hidden_state.shape[:-1], -1))], axis=-1)
+  def __call__(self, joint_iset: chex.Array):
+    x = jnp.reshape(joint_iset, (*joint_iset.shape[:-2], -1))
     x = self.init_layer(x)
     x = self.core_mlp(x)
-    x = self.last_layer(x)
-    encoded_state = x.reshape(*x.shape[:-1], self.encoded_classes, self.encoded_categories)
-    return encoded_state
+    tokens = self.last_layer(x)
+    return tokens
+  
+class ObservedPredictor(nnx.Module):
+  """Receive a current recurrent state and observation
+  latent tokens produced by some encoder and return current stochastic
+  state logits."""
+
+  def __init__(self, recurrent_state_size, token_features, encoded_classes, encoded_categories, hidden_features, num_layers, rngs:nnx.Rngs) ->None:
+    self.encoded_classes = encoded_classes
+    self.encoded_categories = encoded_categories
+    self.init_layer = LinNormRelu(recurrent_state_size + token_features, hidden_features, rngs)
+    self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
+    self.last_layer = nnx.Linear(hidden_features, (encoded_classes * encoded_categories), rngs=rngs)
+
+  def __call__(self, recurrent_state: chex.Array, obs_tokens: chex.Array):
+    x = jnp.concatenate([recurrent_state, obs_tokens], axis=-1)
+    x = self.init_layer(x)
+    x = self.core_mlp(x)
+    stoch_logits = self.last_layer(x)
+    stoch_logits = jnp.reshape(stoch_logits, (*stoch_logits.shape[:-1], self.encoded_classes, self.encoded_categories))
+    return stoch_logits
 
 class Decoder(nnx.Module):
   """Receive a current deterministic latent state (eg. a encoded_categories-hot vector)
+  and recurrent state
   and return a reconstruction of current observation."""
-  def __init__(self, hidden_state_size, observation_features, encoded_classes, encoded_categories, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
+  def __init__(self, recurrent_state_size, observation_features, encoded_classes, encoded_categories, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
     self.encoded_classes = encoded_classes
     self.encoded_categories = encoded_categories
-    self.init_layer = LinNormRelu(hidden_state_size + encoded_classes * encoded_categories, hidden_features, rngs)
+    self.init_layer = LinNormRelu(recurrent_state_size + encoded_classes * encoded_categories, hidden_features, rngs)
     self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
     self.last_layer = nnx.Linear(hidden_features, observation_features, rngs=rngs)
     
-  def __call__(self, hidden_state: chex.Array, encoded_state: chex.Array):
-    x = jnp.concatenate([hidden_state, encoded_state.reshape(*encoded_state.shape[:-2], -1)], axis=-1)
+  def __call__(self, recurrent_state: chex.Array, encoded_state: chex.Array):
+    x = jnp.concatenate([recurrent_state, encoded_state.reshape(*encoded_state.shape[:-2], -1)], axis=-1)
     x = self.init_layer(x)
     x = self.core_mlp(x)
     obs = self.last_layer(x)
     return obs
-
-class IsetDecoder(nnx.Module):
-  """Receive a current deterministic latent state (eg. a encoded_categories-hot vector)
-  and return a reconstruction of current infoset for one player."""
-  def __init__(self, hidden_state_size, iset_features, encoded_classes, encoded_categories, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
-    self.encoded_classes = encoded_classes
-    self.encoded_categories = encoded_categories
-    self.init_layer = LinNormRelu(hidden_state_size + encoded_classes * encoded_categories, hidden_features, rngs)
-    self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
-    self.last_layer = nnx.Linear(hidden_features, iset_features, rngs=rngs)
-    
-  def __call__(self, hidden_state: chex.Array, encoded_state: chex.Array):
-    x = jnp.concatenate([hidden_state, encoded_state.reshape(*encoded_state.shape[:-2], -1)], axis=-1)
-    x = self.init_layer(x)
-    x = self.core_mlp(x)
-    iset = self.last_layer(x)
-    return iset
   
 class DynamicsPredictor(nnx.Module):
   """Recieve a current hidden state and return the current stochastic state logits.
   Acts as a prior to the encoders posterior."""
-  def __init__(self, hidden_state_size, encoded_classes, encoded_categories, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
+  def __init__(self, recurrent_state_size, encoded_classes, encoded_categories, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
     self.encoded_classes = encoded_classes
     self.encoded_categories = encoded_categories
-    self.init_layer = LinNormRelu(hidden_state_size, hidden_features, rngs)
+    self.init_layer = LinNormRelu(recurrent_state_size, hidden_features, rngs)
     self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
     self.last_layer = nnx.Linear(hidden_features, encoded_classes * encoded_categories, rngs=rngs)
     
-  def __call__(self, hidden_state: chex.Array):
-    x = self.init_layer(hidden_state)
+  def __call__(self, recurrent_state: chex.Array):
+    x = self.init_layer(recurrent_state)
     x = self.core_mlp(x)
     x = self.last_layer(x)
     encoded_state = x.reshape(*x.shape[:-1], self.encoded_classes, self.encoded_categories)
@@ -256,16 +240,16 @@ class Predictor(nnx.Module):
   Pass the done logits through sigmoid and compare against a threshold if you want
   to obtain an actual done flag. The reward are logits of a distribution over the exponentially
   spaced bins like symexp([-bin_range, bin_range])."""
-  def __init__(self, hidden_state_size, encoded_classes, encoded_categories, bin_range, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
-    self.init_layer = LinNormRelu(hidden_state_size + encoded_classes * encoded_categories, hidden_features, rngs)
+  def __init__(self, recurrent_state_size, encoded_classes, encoded_categories, bin_range, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
+    self.init_layer = LinNormRelu(recurrent_state_size + encoded_classes * encoded_categories, hidden_features, rngs)
     self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
     #Initialize the reward output layer to all zeros, as per
     # https://arxiv.org/pdf/2301.04104 page 6
     self.reward_layer = nnx.Linear(hidden_features, (2 * bin_range) + 1, rngs=rngs, kernel_init= nnx.initializers.zeros_init(), bias_init=nnx.initializers.zeros_init())
     self.done_layer = nnx.Linear(hidden_features, 1, rngs=rngs)
     
-  def __call__(self, hidden_state: chex.Array, encoded_state: chex.Array):
-    x = jnp.concatenate([hidden_state, encoded_state.reshape(*encoded_state.shape[:-2], -1)], axis=-1)
+  def __call__(self, recurrent_state: chex.Array, encoded_state: chex.Array):
+    x = jnp.concatenate([recurrent_state, encoded_state.reshape(*encoded_state.shape[:-2], -1)], axis=-1)
     x = self.init_layer(x)
     x = self.core_mlp(x)
     reward = self.reward_layer(x)
@@ -274,60 +258,61 @@ class Predictor(nnx.Module):
 
 class LegalActionsNetwork(nnx.Module):
   """Receive a current hidden state and deterministic state and return the legal action logits."""
-  def __init__(self, num_players, action_dimension, encoded_classes, encoded_categories, hidden_state_size, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
-    self.init_layer = LinNormRelu(hidden_state_size + (encoded_classes * encoded_categories), hidden_features, rngs)
+  def __init__(self, num_players, action_dimension, encoded_classes, encoded_categories, recurrent_state_size, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
+    self.init_layer = LinNormRelu(recurrent_state_size + (encoded_classes * encoded_categories), hidden_features, rngs)
     self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
     self.legal_layer = nnx.Linear(hidden_features, num_players * action_dimension, rngs=rngs)
 
     self.num_players = num_players
     self.action_dimension = action_dimension
 
-  def __call__(self, hidden_state: chex.Array, encoded_state: chex.Array):
-    x = jnp.concatenate([hidden_state, encoded_state.reshape(*encoded_state.shape[:-2], -1)], axis=-1)
+  def __call__(self, recurrent_state: chex.Array, encoded_state: chex.Array):
+    x = jnp.concatenate([recurrent_state, encoded_state.reshape(*encoded_state.shape[:-2], -1)], axis=-1)
     x = self.init_layer(x)
     x = self.core_mlp(x)
     legal = self.legal_layer(x)
     return jnp.reshape(legal, (*legal.shape[:-1], self.num_players, self.action_dimension))
 
-# class RewardPredictor(nnx.Module):
-#   """Receive a current hidden state and deterministic state and 
-#   return the logits of a the reward categorical
-#   distribution over exponentially spaced bins such as
-#   symexp([-bin_range, bin_range])"""
-#   def __init__(self, bin_range, encoded_classes, encoded_categories, hidden_state_size, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
-#     self.init_layer = LinNormRelu(hidden_state_size + (encoded_classes * encoded_categories), hidden_features, rngs)
-#     self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
-#     self.reward_layer = nnx.Linear(hidden_features, (2 * bin_range) + 1, rngs=rngs)
+class RewardPredictor(nnx.Module):
+  """Receive a current hidden state and deterministic state and 
+  return the logits of a the reward categorical
+  distribution over exponentially spaced bins such as
+  symexp([-bin_range, bin_range])"""
+  def __init__(self, bin_range, encoded_classes, encoded_categories, recurrent_state_size, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
+    self.init_layer = LinNormRelu(recurrent_state_size + (encoded_categories * encoded_classes), hidden_features, rngs)
+    self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
+    self.reward_layer = nnx.Linear(hidden_features, (2 * bin_range) + 1, rngs=rngs,kernel_init= nnx.initializers.zeros_init(), bias_init=nnx.initializers.zeros_init())
 
 
-#   def __call__(self, hidden_state: chex.Array, encoded_state: chex.Array):
-#     x = jnp.concatenate([hidden_state, encoded_state.reshape(*encoded_state.shape[:-2], -1)], axis=-1)
-#     x = self.init_layer(x)
-#     x = self.core_mlp(x)
-#     reward_dist_logits = self.reward_layer(x)
-#     return reward_dist_logits
+  def __call__(self, recurrent_state: chex.Array, encoded_state: chex.Array):
+    x = jnp.concatenate([recurrent_state, encoded_state.reshape(*encoded_state.shape[:-2], -1)], axis=-1)
+    x = self.init_layer(x)
+    x = self.core_mlp(x)
+    reward_dist_logits = self.reward_layer(x)
+    return reward_dist_logits
   
-# class DonePredictor(nnx.Module):
-#   """Receive a current hidden state and deterministic state and
-#   return the logits of the done/terminal flag"""
-#   def __init__(self,encoded_classes, encoded_categories, hidden_state_size, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
-#     self.init_layer = LinNormRelu(hidden_state_size + (encoded_classes * encoded_categories), hidden_features, rngs)
-#     self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
-#     self.done_layer = nnx.Linear(hidden_features, 1, rngs=rngs)
+class DonePredictor(nnx.Module):
+  """Receive a current hidden state and deterministic state and
+  return the logits of the done/terminal flag"""
+  def __init__(self,encoded_classes, encoded_categories, recurrent_state_size, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
+    self.init_layer = LinNormRelu(recurrent_state_size + (encoded_classes * encoded_categories), hidden_features, rngs)
+    self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
+    self.done_layer = nnx.Linear(hidden_features, 1, rngs=rngs)
 
 
-#   def __call__(self, hidden_state: chex.Array, encoded_state: chex.Array):
-#     x = jnp.concatenate([hidden_state, encoded_state.reshape(*encoded_state.shape[:-2], -1)], axis=-1)
-#     x = self.init_layer(x)
-#     x = self.core_mlp(x)
-#     done_logit = self.done_layer(x)
-#     return done_logit
+  def __call__(self, recurrent_state: chex.Array, encoded_state: chex.Array):
+    x = jnp.concatenate([recurrent_state, encoded_state.reshape(*encoded_state.shape[:-2], -1)], axis=-1)
+    x = self.init_layer(x)
+    x = self.core_mlp(x)
+    done_logit = self.done_layer(x)
+    return done_logit
+  
 
 # class PredictorWithLegal(nnx.Module):
 #   """Has reward and done heads the same way as standard predictor,
 #   but also predicts legal action mask for both players."""
-#   def __init__(self, num_players, action_dimension, hidden_state_size, encoded_classes, encoded_categories, bin_range, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
-#     self.init_layer = LinNormRelu(hidden_state_size + encoded_classes * encoded_categories, hidden_features, rngs)
+#   def __init__(self, num_players, action_dimension, recurrent_state_size, encoded_classes, encoded_categories, bin_range, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
+#     self.init_layer = LinNormRelu(recurrent_state_size + encoded_classes * encoded_categories, hidden_features, rngs)
 #     self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
 #     self.reward_layer = nnx.Linear(hidden_features, (2 * bin_range) + 1, rngs=rngs)
 #     #self.reward_layer = nnx.Linear(hidden_features, 1, rngs=rngs)
@@ -337,8 +322,8 @@ class LegalActionsNetwork(nnx.Module):
 #     self.num_players = num_players
 #     self.action_dimension = action_dimension
     
-#   def __call__(self, hidden_state: chex.Array, encoded_state: chex.Array):
-#     x = jnp.concatenate([hidden_state, encoded_state.reshape(*encoded_state.shape[:-2], -1)], axis=-1)
+#   def __call__(self, recurrent_state: chex.Array, encoded_state: chex.Array):
+#     x = jnp.concatenate([recurrent_state, encoded_state.reshape(*encoded_state.shape[:-2], -1)], axis=-1)
 #     x = self.init_layer(x)
 #     x = self.core_mlp(x)
 #     reward = self.reward_layer(x)
@@ -346,296 +331,4 @@ class LegalActionsNetwork(nnx.Module):
 #     flat_legal = self.legal_layer(x)
 #     legal = jnp.reshape(flat_legal, (*flat_legal.shape[:-1], self.num_players, self.action_dimension))
 #     return reward, done, legal
-  
-  
 
-
-@chex.dataclass(frozen=True)
-class DreamerOptimizers():
-  sequence_optimizer: nnx.Optimizer
-  encoder_optimizer: nnx.Optimizer
-  decoder_optimizer: nnx.Optimizer
-  dynamics_optimizer: nnx.Optimizer
-  predictor_optimizer: nnx.Optimizer
-
-
-
-@chex.dataclass(frozen=True)
-class DreamerMAOptimizers():
-  sequence_optimizer: nnx.Optimizer
-  encoder_optimizer: nnx.Optimizer
-  p1_decoder_optimizer: nnx.Optimizer
-  p2_decoder_optimizer: nnx.Optimizer
-  dynamics_optimizer: nnx.Optimizer
-  predictor_optimizer: nnx.Optimizer
-  legal_actions_optimizer: nnx.Optimizer
-
-@chex.dataclass(frozen=True)
-class RNaDOptimizers():
-  rnad_optimizer: nnx.Optimizer
-  rnad_target_optimizer: nnx.Optimizer
-
-
-@chex.dataclass(frozen=True)
-class ActorCriticOptimizers():
-  actor_optimizer: nnx.Optimizer
-  critic_optimizer: nnx.Optimizer
-  target_optimizer: nnx.Optimizer
-
-
-@chex.dataclass(frozen=True)
-class JointOptimizers():
-  sequence_optimizer: nnx.Optimizer
-  encoder_optimizer: nnx.Optimizer
-  p1_decoder_optimizer: nnx.Optimizer
-  p2_decoder_optimizer: nnx.Optimizer
-  dynamics_optimizer: nnx.Optimizer
-  predictor_optimizer: nnx.Optimizer
-  legal_actions_optimizer: nnx.Optimizer
-  rnad_optimizer: nnx.Optimizer
-  rnad_target_optimizer: nnx.Optimizer
-
-
-def initialize_ma_dreamer_optimizers(config: DreamerMAConfig, game: JaxGame, rngs: nnx.Rngs) -> DreamerMAOptimizers:
-  """Initializes the model world model networks and optimizers.
-  Multi agent version.""" 
-
-  
-  hidden_state_size = config.sequential_network_details[0]
-  #If hidden state size is unset,
-  # set it to the size of the joint
-  # infoset. This should be the minimal
-  # required size to capture all the context 
-  if hidden_state_size < 1:
-    hidden_state_size = game.num_players() * game.information_state_tensor_shape()
-
-  sequence_optimizer = nnx.Optimizer(
-    model= SequenceModel(
-        encoded_classes=config.encoded_classes,
-        encoded_categories=config.encoded_categories,
-        action_features=game.num_distinct_actions(),
-        num_players= game.num_players(),
-        hidden_state_size=hidden_state_size,
-        linear_hidden_features=config.sequential_network_details[1],
-        linear_hidden_layers=config.sequential_network_details[2],
-        rngs=rngs
-    ),
-    tx=optax.adam(learning_rate=config.learning_rate),
-  )
-  
-
-  encoder_optimizer = nnx.Optimizer(
-    model= JointIsetEncoder(
-        hidden_state_size = hidden_state_size,
-        iset_features=game.information_state_tensor_shape(),
-        num_players= game.num_players(),
-        encoded_classes=config.encoded_classes,
-        encoded_categories=config.encoded_categories,
-        hidden_features=config.encoder_network_details[0],
-        num_layers=config.encoder_network_details[1],
-        rngs=rngs
-    ),
-    tx=optax.adam(learning_rate=config.learning_rate),
-  )
-
-
-  p1_decoder_optimizer = nnx.Optimizer(
-    model= IsetDecoder(
-        hidden_state_size=hidden_state_size,
-        iset_features=game.information_state_tensor_shape(),
-        encoded_classes=config.encoded_classes,
-        encoded_categories=config.encoded_categories,
-        hidden_features=config.decoder_network_details[0],
-        num_layers=config.decoder_network_details[1],
-        rngs=rngs
-    ),
-    tx=optax.adam(learning_rate=config.learning_rate),
-  )
-  p2_decoder_optimizer = nnx.Optimizer(
-    model= IsetDecoder(
-        hidden_state_size=hidden_state_size,
-        iset_features=game.information_state_tensor_shape(),
-        encoded_classes=config.encoded_classes,
-        encoded_categories=config.encoded_categories,
-        hidden_features=config.decoder_network_details[0],
-        num_layers=config.decoder_network_details[1],
-        rngs=rngs
-    ),
-    tx=optax.adam(learning_rate=config.learning_rate),
-  )
-
-  dynamics_optimizer = nnx.Optimizer(
-    model= DynamicsPredictor(
-        hidden_state_size=hidden_state_size,
-        encoded_classes=config.encoded_classes,
-        encoded_categories=config.encoded_categories,
-        hidden_features=config.dynamics_network_details[0],
-        num_layers=config.dynamics_network_details[1],
-        rngs=rngs
-    ),
-    tx=optax.adam(learning_rate=config.learning_rate),
-  )
-
-  
-  predictor_optimizer = nnx.Optimizer(
-    model= Predictor(
-        hidden_state_size=hidden_state_size,
-        encoded_classes=config.encoded_classes,
-        encoded_categories=config.encoded_categories,
-        bin_range= config.bin_range,
-        hidden_features=config.predictor_network_details[0],
-        num_layers=config.predictor_network_details[1],
-        rngs=rngs
-      ),
-    tx=optax.adam(learning_rate=config.learning_rate),
-  )
-
-  legal_actions_optimizer = nnx.Optimizer(
-    model=LegalActionsNetwork(
-        num_players=game.num_players(),
-        action_dimension=game.num_distinct_actions(),
-        encoded_classes=config.encoded_classes,
-        encoded_categories=config.encoded_categories,
-        hidden_state_size=hidden_state_size,
-        hidden_features=config.legal_actions_network_details[0],
-        num_layers=config.legal_actions_network_details[1],
-        rngs=rngs
-    ),
-    tx=optax.adam(learning_rate=config.learning_rate),
-  )
-  
-  optims = DreamerMAOptimizers(
-    sequence_optimizer=sequence_optimizer,
-    encoder_optimizer=encoder_optimizer,
-    p1_decoder_optimizer=p1_decoder_optimizer,
-    p2_decoder_optimizer = p2_decoder_optimizer,
-    dynamics_optimizer=dynamics_optimizer,
-    predictor_optimizer=predictor_optimizer,
-    legal_actions_optimizer=legal_actions_optimizer
-  )
-
-  return optims
-  
-  
-def initialize_dreamer_optimizers(config: DreamerConfig, game: JaxGame, rngs: nnx.Rngs) -> DreamerOptimizers:
-  """Initializes the model world model networks and optimizers.
-  Single agent version.""" 
-
-  sequence_optimizer = nnx.Optimizer(
-    model= SequenceModel(
-        encoded_classes=config.encoded_classes,
-        encoded_categories=config.encoded_categories,
-        action_features=game.num_distinct_actions(),
-        num_players=game.num_players(),
-        hidden_state_size=config.hidden_state_size,
-        rngs=rngs
-    ),
-    tx=optax.adam(learning_rate=config.learning_rate),
-  )
-  
-
-  encoder_optimizer = nnx.Optimizer(
-    model= Encoder(
-        hidden_state_size=config.hidden_state_size,
-        observation_features=game.observation_tensor_shape(),
-        encoded_classes=config.encoded_classes,
-        encoded_categories=config.encoded_categories,
-        hidden_features=config.encoder_network_details[0],
-        num_layers=config.encoder_network_details[1],
-        rngs=rngs
-    ),
-    tx=optax.adam(learning_rate=config.learning_rate),
-  )
-
-
-  decoder_optimizer = nnx.Optimizer(
-    model= Decoder(
-        hidden_state_size=config.hidden_state_size,
-        observation_features=game.observation_tensor_shape(),
-        encoded_classes=config.encoded_classes,
-        encoded_categories=config.encoded_categories,
-        hidden_features=config.decoder_network_details[0],
-        num_layers=config.decoder_network_details[1],
-        rngs=rngs
-    ),
-    tx=optax.adam(learning_rate=config.learning_rate),
-  )
-
-  dynamics_optimizer = nnx.Optimizer(
-    model= DynamicsPredictor(
-        hidden_state_size=config.hidden_state_size,
-        encoded_classes=config.encoded_classes,
-        encoded_categories=config.encoded_categories,
-        hidden_features=config.dynamics_network_details[0],
-        num_layers=config.dynamics_network_details[1],
-        rngs=rngs
-    ),
-    tx=optax.adam(learning_rate=config.learning_rate),
-  )
-  
-  predictor_optimizer = nnx.Optimizer(
-    model= Predictor(
-        hidden_state_size=config.hidden_state_size,
-        encoded_classes=config.encoded_classes,
-        encoded_categories=config.encoded_categories,
-        bin_range= config.bin_range,
-        hidden_features=config.predictor_network_details[0],
-        num_layers=config.predictor_network_details[1],
-        rngs=rngs
-      ),
-    tx=optax.adam(learning_rate=config.learning_rate),
-  )
-  
-  optims = DreamerOptimizers(
-    sequence_optimizer=sequence_optimizer,
-    encoder_optimizer=encoder_optimizer,
-    decoder_optimizer=decoder_optimizer,
-    dynamics_optimizer=dynamics_optimizer,
-    predictor_optimizer=predictor_optimizer
-  )
-
-  return optims
-
-def initialize_rnad_optimizers(config: RNaDConfig, iset_size: int, actions: int, rngs: nnx.Rngs) ->RNaDOptimizers:
-  """Initializes optimizers for the main algorithm network and the target network for the RNaD algorithm."""
-  rnad_network = RNaDNetwork(iset_size, actions, config.bin_range, config.rnad_network_details[0], config.rnad_network_details[1], rngs=rngs)
-  target_network = RNaDNetwork(iset_size, actions, config.bin_range, config.rnad_network_details[0], config.rnad_network_details[1], rngs=rngs)
-  optimizer = nnx.Optimizer(model=rnad_network, tx= optax.chain(optax.adam(config.learning_rate, b1=0.0), optax.clip(100)))
-  optimizer_target = nnx.Optimizer(model=target_network, tx=optax.sgd(config.target_network_update))
-  rnad_optimizers = RNaDOptimizers(rnad_optimizer = optimizer,
-                                    rnad_target_optimizer = optimizer_target)
-  return rnad_optimizers
-
-
-def initialize_actor_critic_optimizers(config: ActorCriticConfig, input_features, actions:int, rngs:nnx.Rngs):
-  """Initializes optimizers for the standard Dreamer actor critic. """
-  actor_network = ActorNetwork(input_features, actions, config.actor_network_details[0], config.actor_network_details[1], rngs)
-  actor_optimizer = nnx.Optimizer(model=actor_network, tx= optax.chain(optax.adam(config.learning_rate, b1=0.0), optax.clip(100)))
-  #TODO: Use the bin range from Dreamer and rework RNaD in similar way
-  critic_network = CriticNetwork(input_features, config.bin_range, config.critic_network_details[0], config.critic_network_details[1], rngs)
-  critic_optimizer = nnx.Optimizer(model=critic_network, tx= optax.chain(optax.adam(config.learning_rate, b1=0.0), optax.clip(100)))
-  target_network = CriticNetwork(input_features, config.bin_range, config.critic_network_details[0], config.critic_network_details[1], rngs)
-  #Just to handle the EMA updates
-  target_optimizer = nnx.Optimizer(model = target_network, tx =optax.sgd(config.target_network_update))
-
-  optimizers = ActorCriticOptimizers(actor_optimizer = actor_optimizer, critic_optimizer = critic_optimizer,
-                                     target_optimizer = target_optimizer)
-  return optimizers
-
-def initialize_joint_optimizers(dreamer_optimizers: DreamerMAOptimizers, rnad_config: RNaDConfig, iset_size: int, actions: int, rnad_rngs: nnx.Rngs) ->JointOptimizers:
-  """Initializes optimizers for joint training. It is one module,
-  containing optimizers both for DreamerMA world model and RNaDDreamer actor.
-  Initializes the optimizers from the already given instance of DreamerOptimizers, using
-  reference sharing."""
-  rnad_optimizers = initialize_rnad_optimizers(rnad_config, iset_size, actions, rnad_rngs)
-
-  joint_optimizers = JointOptimizers(sequence_optimizer=dreamer_optimizers.sequence_optimizer,
-    encoder_optimizer=dreamer_optimizers.encoder_optimizer,
-    p1_decoder_optimizer=dreamer_optimizers.p1_decoder_optimizer,
-    p2_decoder_optimizer = dreamer_optimizers.p2_decoder_optimizer,
-    dynamics_optimizer=dreamer_optimizers.dynamics_optimizer,
-    predictor_optimizer=dreamer_optimizers.predictor_optimizer,
-    legal_actions_optimizer=dreamer_optimizers.legal_actions_optimizer,
-    rnad_optimizer = rnad_optimizers.rnad_optimizer,
-    rnad_target_optimizer = rnad_optimizers.rnad_target_optimizer)
-  return joint_optimizers
