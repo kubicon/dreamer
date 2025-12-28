@@ -42,8 +42,10 @@ class MARSSM(nnx.Module):
     self.encoded_categories = wm_config.encoded_categories
     if self.is_iig:
       self.infoset_size = game.information_state_tensor_shape()
+      print(f"Using original game isets of shape {self.infoset_size}")
     else:
       self.infoset_size = (self.num_players + rec_state_size + deter_size)
+      print(f"Using the model states of shape {self.infoset_size}")
     #self.wm_config = wm_config
     #self.ac_config = ac_config
     self.sampling_epsilon = ac_config.sampling_epsilon

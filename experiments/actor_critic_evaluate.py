@@ -110,7 +110,7 @@ def extract_model_policy(model: DreamerMA, game: JaxGame | DreamerModelGame)-> t
     next_states, next_terminal, next_utilities, next_legals = vectorized_next_state(game_states, joint_actions)
     #collapse the action and H(D) dimension into one dimension
     # for next states, legals and reaches
-    next_states = jax.tree_util.tree_map(lambda x: jnp.reshape(x, (-1,) + x.shape[2:]), next_states)
+    next_states = jax.tree.map(lambda x: jnp.reshape(x, (-1,) + x.shape[2:]), next_states)
     next_legals = np.reshape(next_legals, (next_legals.shape[0], -1, next_legals.shape[-1]))
     next_terminal = np.reshape(next_terminal, legal.shape)
     
@@ -124,8 +124,12 @@ def extract_model_policy(model: DreamerMA, game: JaxGame | DreamerModelGame)-> t
     # From [H(D), A1, A2] should select [H(D + 1)] 
     # nonzero() returns indices which are non zero in tuple 
     nonzeros = np.flatnonzero(non_terminal)
-    next_states = jax.tree_util.tree_map(lambda x: x[nonzeros], next_states)
+    next_states = jax.tree.map(lambda x: x[nonzeros], next_states)
     next_legals = next_legals[:, nonzeros]
+    # print(f"Depth {depth}")
+    # print(f"Next utilities {next_utilities.reshape(next_terminal.shape)}")
+    # print(f"Next terminal {next_terminal}")
+    # print(f"Next legals: {next_legals}")
     
     # This should be -1 everywhere, except the part where you have next history. Therey you go by terminal and just add 1
     next_history = (np.cumsum(non_terminal).reshape(non_terminal.shape) * non_terminal) - 1
