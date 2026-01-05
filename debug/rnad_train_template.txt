@@ -1,1 +1,0 @@
-python -m experiments.goofspiel_train --num_cards 3 --seed 42 --num_steps 1001 --save_each 100 --print_each 100 --save_first joint_rnad --replay_ratio -1 --free_bits_threshold 1.0 --beta_representation 0.1 --encoded_classes 1 --encoded_categories 3 --buffer_size 32  --eta 0.2 --vtrace_eta 0.2 --beta_imagination 1.0 --beta_real 0.3 
