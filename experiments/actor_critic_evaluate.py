@@ -557,7 +557,7 @@ def test_loaded(args):
   #print(profiler.output_text(color=True, unicode=True))
   if len(steps) == 0:
     raise FileNotFoundError(f"Model directory {model_dir} and restore step {args.restore_step}. Did not find any file. Make sure"
-                            "the directory contains a file in a form of step_restore_step.pkl, "
+                            " the directory contains a file in a form of step_restore_step.pkl, "
                             "where restore_step is either the specified number, or arbitrary integer if -1.")
   p1_metrics = np.asarray(p1_metrics)
   steps = np.asarray(steps)

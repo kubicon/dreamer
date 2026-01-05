@@ -119,7 +119,9 @@ class CriticNetwork(nnx.Module):
 
 class SequenceModel(nnx.Module):
   '''
-    Used to produce the next state of the game from the hidden state and the joint action
+    Used to produce the next state of the game from the hidden state and the joint action.
+    It is implemented in the same way as in the DreamerV3 reference implementation,
+    except that instead of using their custom BlockLinear uses just standard MLP.
   '''
   def __init__(self, encoded_classes, encoded_categories, action_features, num_players,
                linear_hidden_features: int, linear_hidden_layers: int,
@@ -128,8 +130,12 @@ class SequenceModel(nnx.Module):
     self.hidden_init = LinNormRelu(recurrent_state_size, linear_hidden_features, rngs=rngs)
     self.action_init = LinNormRelu((action_features * num_players), linear_hidden_features, rngs=rngs)
     self.deter_init = LinNormRelu(encoded_classes * encoded_categories, linear_hidden_features, rngs=rngs)
-    self.core_mlp = HiddenMLP(3 * linear_hidden_features, num_layers= 3 * linear_hidden_layers, rngs=rngs)
-    self.gru_cell = nnx.GRUCell(3 * linear_hidden_features, recurrent_state_size, gate_fn=nnx.silu, rngs=rngs) 
+    # Concatenation of the actual recurrent state, with
+    # the embeddings of the recurrent state, action and stochastic state
+    core_input_size = recurrent_state_size + 3 * linear_hidden_features
+    self.core_mlp = HiddenMLP(core_input_size, num_layers= linear_hidden_layers, rngs=rngs)
+    #This is the projection to the reset, cand and update gates
+    self.gate_head = nnx.Linear(core_input_size, 3 * recurrent_state_size, rngs=rngs)
     
   def __call__(self, recurrent_state: chex.Array, deter_state: chex.Array, action:chex.Array):
     """Ensure that action is already one hot encoded. Deter state is the 
@@ -141,8 +147,18 @@ class SequenceModel(nnx.Module):
     x0 = self.hidden_init(recurrent_state)
     x1 = self.deter_init(flat_deter)
     x2 = self.action_init(flat_action)
-    x = jnp.concatenate([x0, x1, x2], axis=-1)
-    new_recurrent_state, _ = self.gru_cell(recurrent_state, x)
+    x = jnp.concatenate([recurrent_state, x0, x1, x2], axis=-1)
+    x = self.core_mlp(x)
+    gates = self.gate_head(x)
+    reset, cand, update = jnp.split(gates, 3, axis=-1)
+    reset = nnx.sigmoid(reset)
+    cand = nnx.tanh(reset * cand)
+    #The -1 makes the update naturally smaller
+    # making the network more biased towards
+    # keeping the old recurrent_state
+    update = nnx.sigmoid(update - 1)
+    new_recurrent_state = update * cand + (1 - update) * recurrent_state
+    
     return new_recurrent_state
   
 

@@ -125,6 +125,8 @@ class MARSSM(nnx.Module):
                                       wm_config.observer_network_details[0],
                                       wm_config.observer_network_details[1],
                                       rngs)
+    
+    self.network_names = ['dyn', 'enc', 'leg', 'observer', 'p1_dec', 'p2_dec', 'rew', 'seq', 'term']
 
     if self.use_rnad:
       self.actor_critic = RNaDNetwork(self.infoset_size,
@@ -133,6 +135,7 @@ class MARSSM(nnx.Module):
                                       ac_config.rnad_network_details[0],
                                       ac_config.rnad_network_details[1],
                                       rngs)
+      self.network_names.append('actor_critic')
     else:
       self.actor = ActorNetwork(self.infoset_size,
                                 self.num_actions,
@@ -144,6 +147,8 @@ class MARSSM(nnx.Module):
                                   ac_config.critic_network_details[0],
                                   ac_config.critic_network_details[1],
                                   rngs)
+      self.network_names.append('actor')
+      self.network_names.append('critic')
       
   def default_ac_timestep(self):
     obs = jnp.zeros((1, self.infoset_size), dtype=f32)

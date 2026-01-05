@@ -76,6 +76,7 @@ class DreamerMA():
                                                           rngs=rngs
                                                           ), tx=target_tx)
       ctor = RNaDDreamer
+      self.network_keys = ma_rssm.network_names[:-1]
     else:
       target_optimizer = nnx.Optimizer(model=CriticNetwork(self.infoset_size,
                                                            self.ac_config.bin_range,
@@ -84,11 +85,14 @@ class DreamerMA():
                                                            rngs=rngs),
                                                            tx = target_tx)
       ctor = DreamerActorCritic
+      self.network_keys = ma_rssm.network_names[:-2]
     self.actor_critic = ctor(self.game, self.ac_config, self.optimizer, target_optimizer)
     #self.wm_cached_train = nnx.cached_partial(self.update_world_model, self.optimizer)
     policy_network = ma_rssm.actor_critic if ma_rssm.use_rnad else ma_rssm.actor
     #Also cache the sampling for the buffer
     self.buffer.cache_sampling(ma_rssm.seq, ma_rssm.enc, ma_rssm.observer, policy_network)
+    self.grad_norms = {k: 0 for k in self.network_keys} 
+    self.metrics = {'dec': 0, 'con': 0, 'leg': 0,  'rew': 0, 'dyn': 0, 'rep': 0}
     
   
   def generate_key(self):
@@ -145,21 +149,25 @@ class DreamerMA():
 
       #[Trajectory, Batch, num_players, obs_size]
       reconstruction_loss = -get_normal_log_prob(predictions.decoded_obs, timestep.obs, use_symlog=True)
-      l_pred += get_loss_mean_with_mask(reconstruction_loss, timestep.valid[..., None, None])
+      dec = get_loss_mean_with_mask(reconstruction_loss, timestep.valid[..., None, None])
+      l_pred += dec
       #[Trajectory, Batch, 1]
       #continuation_loss = -get_normal_log_prob(predictions.done_logit, timestep.terminal.astype(jnp.int16))
       continuation_loss = optax.sigmoid_binary_cross_entropy(predictions.done_logit, timestep.terminal[..., None])
-      l_pred += get_loss_mean_with_mask(continuation_loss, timestep.valid[..., None])
+      con = get_loss_mean_with_mask(continuation_loss, timestep.valid[..., None])
+      l_pred += con
       #[Trajectory, Batch, players, action_dim]
       legal_loss = optax.sigmoid_binary_cross_entropy(predictions.legal_logit, timestep.legal)
       #Legal actions should not be trained in terminal states, as there are no legal actions there
-      l_pred += get_loss_mean_with_mask(legal_loss, ~timestep.terminal[..., None, None])
+      leg = get_loss_mean_with_mask(legal_loss, ~timestep.terminal[..., None, None])
+      l_pred += leg
       #[Trajectory, Batch, 2* bin_range + 1]
       bins = jnp.arange((2 * self.wm_config.bin_range) + 1) - self.wm_config.bin_range
       reward_loss = -get_bin_log_prob(predictions.reward_dist_logit, bins, timestep.reward, use_symlog=True)
       #[Trajectory, Batch, 1]
       #reward_loss = -get_normal_log_prob(timestep.reward, timestep.reward)
-      l_pred += get_loss_mean_with_mask(reward_loss, timestep.valid[..., None])
+      rew = get_loss_mean_with_mask(reward_loss, timestep.valid[..., None])
+      l_pred += rew
 
       #Using free bits to clip dynamics and representation losses
       # thus disabling their gradient when they are below free_bits_clip_threshold
@@ -173,15 +181,25 @@ class DreamerMA():
       repr_loss = kl_divergence(posterior, jax.lax.stop_gradient(prior))
       l_rep += jnp.maximum(self.wm_config.free_bits_clip_threshold, get_loss_mean_with_mask(repr_loss, timestep.valid))
       
-      return self.wm_config.beta_prediction * l_pred + self.wm_config.beta_dynamics * l_dyn + self.wm_config.beta_representation * l_rep, predictions
+      losses = (dec, con, leg, rew, l_dyn, l_rep)
+      mults = (*(self.wm_config.beta_prediction, ) * 4, self.wm_config.beta_dynamics, self.wm_config.beta_representation)
+
+      wm_keys = self.metrics.keys()
+      metrics = {k: v * m for k, v, m in zip(wm_keys, losses, mults)}
+      
+      return self.wm_config.beta_prediction * l_pred + self.wm_config.beta_dynamics * l_dyn + self.wm_config.beta_representation * l_rep, (predictions, metrics)
   
+    grad_norms = self.grad_norms.copy()
     func_data, grad = nnx.value_and_grad(world_model_loss, has_aux=True, argnums=(0))(
                     optimizer.model)
+    if self.wm_config.report_gradnorms:
+      for k in self.network_keys:
+        grad_norms[k] = optax.tree.norm(grad[k], ord=2)
     
-    loss, pred_step = func_data
+    loss, (pred_step, metrics) = func_data
     optimizer.update(grad)
     
-    return loss, pred_step
+    return loss, pred_step, metrics, grad_norms
     
 
   def train_step(self):
@@ -189,13 +207,13 @@ class DreamerMA():
     timestep = self.buffer.mixed_sample(buffer_key)
     wm_key = self.generate_key()
     #wm_loss, pred_step = self.wm_cached_train(timestep, wm_key)
-    wm_loss, pred_step = self.update_world_model(self.optimizer, timestep, wm_key)
+    wm_loss, pred_step, self.wm_metrics, self.grad_norms = self.update_world_model(self.optimizer, timestep, wm_key)
     ac_key = self.generate_key()
-    ac_img_loss, ac_real_loss = self.actor_critic.step(timestep, pred_step, ac_key)
+    self.actor_critic.step(timestep, pred_step, ac_key)
     self.learner_steps += 1
-    return wm_loss, ac_img_loss, ac_real_loss
 
   def train_model(self, model_save_dir:str, num_steps:int, print_each: int = -1, save_each: int = -1, save_first: bool = False):
+    print(f"Training model that is saved at {model_save_dir}")
     if save_first:
       model_file = model_save_dir + f"step_{self.learner_steps}.pkl"
       save_model(self, model_file)
@@ -204,9 +222,14 @@ class DreamerMA():
     init_batch_key = self.generate_key()
     self.buffer.add_batch(self.wm_config.batch_size, init_batch_key)
     for i in range(num_steps):
-      wm_loss, ac_img_loss, ac_real_loss = self.train_step()
+      self.train_step()
       if print_each > 0 and self.learner_steps % print_each == 0:
-        print(f"Step {self.learner_steps}, World model loss: {wm_loss}, Actor critic losses: img: {ac_img_loss} real: {ac_real_loss}")
+        print(f"Step {self.learner_steps}, World model losses: {self.wm_metrics}.")
+        print(f"Actor critic metrics: {self.actor_critic.metrics}.")
+        if self.wm_config.report_gradnorms:
+          print(f"World model gradnorms {self.grad_norms}")
+        if self.ac_config.report_gradnorms:
+          print(f"Actor critic gradnorms {self.actor_critic.grad_norms}")
       if save_each > 0 and self.learner_steps % save_each == 0:
         model_file = model_save_dir + f"step_{self.learner_steps}.pkl"
         save_model(self, model_file)

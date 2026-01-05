@@ -6,6 +6,8 @@ import numpy as np
 import functools
 from games.jax_game import JaxGame, GameState, InformationType
 
+u8 = jnp.uint8
+i8 = jnp.int8
 
 @chex.dataclass(frozen=True)
 class RPSSTate(GameState):
@@ -154,9 +156,9 @@ class JaxStochasticRPS(JaxGame):
   def initialize_structures(self):
     game_state = JaxStochasticRPSState(terminal = jnp.array(False, dtype=bool),
                           is_chance = jnp.array(True, dtype=bool),
-                          p1_points = jnp.array(-3, dtype=jnp.int8),
-                          game_type = jnp.array(-1, dtype=jnp.int8))
-    return game_state, jnp.ones((2, self.actions), dtype=jnp.int8)
+                          p1_points = jnp.array(-3, dtype=i8),
+                          game_type = jnp.array(-1, dtype=i8))
+    return game_state, jnp.ones((2, self.actions), dtype=u8)
 
   
   @functools.partial(jax.jit, static_argnums=(0,))
@@ -193,8 +195,8 @@ class JaxStochasticRPS(JaxGame):
   
   def apply_action_chance(self, game_state:JaxStochasticRPSState, actions):
     # By convention, player 2 "plays" in the chance node
-    game_type = actions[1].astype(jnp.int8)
-    legals = jnp.ones((2, self.actions), dtype=jnp.int8)
+    game_type = actions[1].astype(i8)
+    legals = jnp.ones((2, self.actions), dtype=u8)
     legals = jnp.where(game_type == self.games["lose_paper"], (legals - jax.nn.one_hot(self.moves["p"], self.actions)[None, ...]).astype(legals.dtype), legals )
     after_chance_state = JaxStochasticRPSState(p1_points = game_state.p1_points,
                                                terminal = jnp.array(False, dtype=bool),
@@ -218,10 +220,10 @@ class JaxStochasticRPS(JaxGame):
     # payoffs by 2
     p1_points = p1_points * (1 + jnp.logical_and(perturbed, played_paper))
 
-    legals = jnp.ones((2, self.actions), dtype=jnp.int8)
+    legals = jnp.ones((2, self.actions), dtype=u8)
     legals = jnp.where(game_state.game_type == self.games["lose_paper"], (legals - jax.nn.one_hot(self.moves["p"], self.actions)[None, ...]).astype(legals.dtype), legals )
     new_game_state = JaxStochasticRPSState(terminal = terminal,
-                              p1_points = p1_points.astype(jnp.int8),
+                              p1_points = p1_points.astype(i8),
                               game_type = game_state.game_type,
                               is_chance = jnp.array(False, dtype=bool))
     

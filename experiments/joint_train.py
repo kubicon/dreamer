@@ -34,6 +34,7 @@ def joint_train_loop(args, game:JaxGame):
     print("Creating clean model")
     wm_config = DreamerMAConfig(
       batch_size=args.batch_size,
+      report_gradnorms = args.report_gradnorms,
 
       use_original_iset = args.use_original_iset,
 
@@ -76,6 +77,8 @@ def joint_train_loop(args, game:JaxGame):
     if args.train_mode == "joint_rnad":
       ac_config = RNaDConfig(
           bin_range = args.ac_bin_range,
+          train_real_policy = args.train_real_policy,
+          report_gradnorms = args.report_gradnorms,
 
           beta_imagination = args.beta_imagination,
           beta_real = args.beta_real,
@@ -117,6 +120,8 @@ def joint_train_loop(args, game:JaxGame):
       ac_config = ActorCriticConfig(
 
         bin_range = args.ac_bin_range,
+        train_real_policy = args.train_real_policy,
+        report_gradnorms = args.report_gradnorms,
 
         beta_imagination = args.beta_imagination,
         beta_real = args.beta_real,

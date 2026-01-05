@@ -72,6 +72,10 @@ class BufferConfig:
 @chex.dataclass(frozen=True)
 class RNaDConfig:
 
+
+  train_real_policy: bool = False # Whether to train policy also on real trajectories
+  report_gradnorms: bool = False #Whether to report gradient norms.
+
   beta_imagination: float = 1.0
   beta_real: float = 0.3 # Coeficients for the loss parts. Beta imagination is used for Dreamer
                           # unrolled trajectories and beta real for trajectories from the real environment
@@ -123,6 +127,7 @@ class DreamerMAConfig():
 
 
   use_original_iset: bool = False
+  report_gradnorms: bool = False # Whether to report world model gradient norms
 
   #Weights of the individual loss terms of the world model
   beta_prediction: float = 1
@@ -152,6 +157,10 @@ class ActorCriticConfig():
   # of the target network parameters
   # is 1 - this value
   target_network_update: float = 1e-3
+
+  
+  train_real_policy: bool = False # Whether to train policy also on real trajectories
+  report_gradnorms: bool = False #Whether to report gradient norms.
 
   beta_imagination: float = 1.0
   beta_real: float = 0.3 # Coeficients for the loss parts. Beta imagination is used for Dreamer
@@ -227,7 +236,7 @@ def legal_log_policy(logit: chex.Array, legal: chex.Array):
   
   normalization = jnp.sum(masked_exp_logit, axis=-1, keepdims=True)
   log_policy = shifted_logit - jnp.log(normalization + (normalization == 0))
-  legal_log_policy = log_policy * legal
+  legal_log_policy = jnp.where(legal > 0, log_policy, 0.0)
   return legal_log_policy
 
 def policy_ratio(pi: chex.Array, mu: chex.Array, actions_oh: chex.Array, valid: chex.Array) -> chex.Array: 

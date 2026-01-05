@@ -2,12 +2,12 @@ import jax
 import numpy as np
 import jax.numpy as jnp
 import chex
+import optax
 import flax.nnx as nnx
 
 from functools import partial
 
 
-from games.jax_game import InformationType
 
 from distributions import get_bin_log_prob
 from ma_rssm import *
@@ -117,8 +117,9 @@ class DreamerActorCritic():
 
     self.actions = game.num_distinct_actions()
     self.num_players = game.num_players()
-    self.is_iig = self.optimizer.model.is_iig
-    self.input_size = self.optimizer.model.infoset_size
+    ma_rssm = self.optimizer.model
+    self.is_iig = ma_rssm.is_iig
+    self.input_size = ma_rssm.infoset_size
 
     num_last = self.config.num_last
     #If negative, take all for unroll, the Dreamer trajectories
@@ -133,6 +134,12 @@ class DreamerActorCritic():
     self.return_range = jnp.array(0)
     #self.cached_step = nnx.cached_partial(self.update_paramaters_and_model, self.optimizer, self.target_optimizer)
     self.learner_steps = 0
+    self.metrics_keys = ['img_val', 'img_policy', 'real_val']
+    if self.config.train_real_policy:
+      self.metrics_keys.append('real_policy')
+    self.metrics = {k: 0 for k in self.metrics_keys}
+    self.grad_norms = {'img': {}, 'real': {}}
+    self.network_keys = ma_rssm.network_names[-2]
   
     
   
@@ -209,9 +216,8 @@ class DreamerActorCritic():
         reinforce_loss_value = -get_loss_mean_with_mask(loss_reinforce, expanded_valid)
       else:
         reinforce_loss_value = 0
-      #jax.debug.breakpoint()
 
-      return v_loss_value + reinforce_loss_value, new_range
+      return v_loss_value + reinforce_loss_value, new_range, v_loss_value, reinforce_loss_value
 
     def imagination_loss(model: MARSSM,
       target_network: RNaDNetwork,
@@ -220,22 +226,28 @@ class DreamerActorCritic():
       return_range: chex.Array,
       beta_imagination: float):
         timestep = jax.lax.stop_gradient(model.imagine_trajectories(trajectory_key, starting_points))
-        loss_val, new_range = actor_critic_loss(timestep, model.actor, model.critic, target_network, return_range) 
-        return beta_imagination * loss_val, new_range
+        loss_val, new_range, v_loss, p_loss = actor_critic_loss(timestep, model.actor, model.critic, target_network, return_range) 
+        img_keys = self.metrics_keys[:2]
+        losses = (v_loss, p_loss)
+        metrics = {k: beta_imagination * v for k, v in zip(img_keys, losses)}
+        return beta_imagination * loss_val, (new_range, metrics)
     
     def real_loss(model: MARSSM,
       target_network: RNaDNetwork,
       timestep: ActorCriticTimeStep,
       return_range: chex.Array,
       beta_real: float):
-        loss_val, new_range = actor_critic_loss(timestep, model.actor, model.critic, target_network, return_range, compute_actor_loss=False)
-        return beta_real * loss_val, new_range
+        loss_val, new_range, v_loss, p_loss = actor_critic_loss(timestep, model.actor, model.critic, target_network, return_range, compute_actor_loss=self.config.train_real_policy)
+        real_keys = self.metrics_keys[2:]
+        losses = (v_loss, p_loss) if self.config.train_real_policy else (v_loss, )
+        metrics = {k: beta_real * v for k, v in zip(real_keys, losses)}
+        return beta_real * loss_val, (new_range, metrics)
       
     
     starting_points = jax.tree.map(lambda x: x[-self.num_last: ].reshape((-1, *x.shape[2:])), wm_prediction_step)
     #starting_points = jax.tree.map(lambda x: x[0].reshape((-1, *x.shape[2:])), wm_prediction_step)
     #jax.tree.map(lambda x: print(x.shape), starting_points)
-    img_return, grads = nnx.value_and_grad(imagination_loss, argnums=(0), has_aux=True)(
+    img_return, igrad = nnx.value_and_grad(imagination_loss, argnums=(0), has_aux=True)(
       optimizer.model,
       target_optimizer.model,
       trajectory_key, 
@@ -243,35 +255,43 @@ class DreamerActorCritic():
       return_range,
       self.config.beta_imagination)
     
-    img_loss, new_range = img_return
-    optimizer.update(grads)
+    img_loss, (new_range, img_metrics) = img_return
+    optimizer.update(igrad)
     ac_timestep = wm_timestep_to_timestep(wm_timestep, wm_prediction_step, self.is_iig)             
-    r_return, grads = nnx.value_and_grad(real_loss, argnums=(0), has_aux=True)(
+    r_return, rgrad = nnx.value_and_grad(real_loss, argnums=(0), has_aux=True)(
       optimizer.model,
       target_optimizer.model,
       ac_timestep,
       new_range,
       self.config.beta_real
     )
-    r_loss, new_range = r_return
-    optimizer.update(grads)
+    r_loss, (new_range, r_metrics) = r_return
+    optimizer.update(rgrad)
+
+    grad_norms = self.grad_norms.copy()
+    if self.config.report_gradnorms:
+      grad_keys = self.grad_norms.keys()
+      grads = (igrad, rgrad)
+      for k, g in zip(grad_keys, grads):
+        for n in self.network_keys:
+          grad_norms[k][n] = optax.tree.norm(g[n], ord=2)
 
     critic_graphdef, state = nnx.split(optimizer.model.critic)
     _, state_target = nnx.split(target_optimizer.model)
+
+    img_metrics.update(r_metrics)
 
     #This grad coupled with vanilla SGD optimizer 
     # is equivalent to the EMA formula (1 - alpha) * state_target + alpha * state
     target_grad = jax.tree.map(lambda a, b: a - b, state_target, state)
     target_optimizer.update(target_grad)
 
-    return img_loss, r_loss, new_range
+    return img_loss + r_loss, new_range, img_metrics, grad_norms
 
   
   def step(self, wm_timestep: TimeStep, wm_prediction_step:PredictionStepWithLegal, trajectory_key: chex.Array):
-    img_loss, r_loss, self.return_range =  self.update_paramaters_and_model(self.optimizer, self.target_optimizer, trajectory_key, wm_timestep, wm_prediction_step, self.return_range)
-    #img_loss, r_loss, self.return_range = self.cached_step(trajectory_key, wm_timestep, wm_prediction_step, self.return_range)
+    loss, self.return_range, self.metrics, self.grad_norms =  self.update_paramaters_and_model(self.optimizer, self.target_optimizer, trajectory_key, wm_timestep, wm_prediction_step, self.return_range)
     self.learner_steps += 1
-    return img_loss, r_loss
   
   def getstate(self):
     return {'return_range': self.return_range,

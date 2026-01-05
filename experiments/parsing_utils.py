@@ -99,7 +99,6 @@ def add_rnad_arguments(parser: ArgumentParser) ->ArgumentParser:
   parser.add_argument("--state_sample_threshold", type=float, default=0.05, help="Threshold for the stochastic state sampling. If the probability of a class is below this threshold, it is not sampled.")
   parser.add_argument("--terminal_threshold", type=float, default=0.5, help="How much probability must the softmaxed logit have, to consider the state terminal.")
   parser.add_argument("--legal_threshold", type=float, default=0.5, help="How much probability must the softmaxed logit have, to consider the action legal.")
-  parser.add_argument("--num_last", type=int, default=-1, help="How many steps from the end of the trajectory to take as starting points for imagination. If <= 0, take the entire trajectory.")
 
   #Loss coefficients
   parser.add_argument("--beta_imagination", type=float, default=1.0, help="Coefficient for the loss on Dreamer imagined trajectories.")
@@ -114,8 +113,14 @@ def add_rnad_arguments(parser: ArgumentParser) ->ArgumentParser:
   parser.add_argument("--gamma_vtrace", type=float, default=1.0, help="Discount factor for V-Trace")
   parser.add_argument("--lambda_vtrace", type=float, default=1.0, help="Lambda parameter for V-Trace")
 
+  #For the return normalization technique
+  parser.add_argument("--upper_percentile", type=float, default=95, help="Upper percentile for the return normalization range")
+  parser.add_argument("--lower_percentile", type=float, default=5, help="Lower percentile for the return normalization range")
+  parser.add_argument("--range_ema_coeff", type=float, default=0.99, help="Coefficient for the EMA update of return normalization range")
+  #For taking imagination starts
+  parser.add_argument("--num_last", type=int, default=-1, help="How many steps from the end of the trajectory to take as starting points for imagination. If <= 0, take the entire trajectory.")
 
-  ##NeuRD parameters
+  ##NeuRD parameters, currently not used, because currently the return normalization is used
   parser.add_argument("--neurd_clip", type=float, default=10000, help="Clip parameter for NeuRD")
   parser.add_argument("--neurd_threshold", type=float, default=2, help="Threshold parameter for NeuRD")
 
@@ -132,7 +137,7 @@ def add_optimizer_arguments(parser: ArgumentParser) -> ArgumentParser:
   # Core optimization hyperparameters
   parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate for the optimizer.")
   parser.add_argument("--agc", type=float, default=0.3, help="Adaptive Gradient Clipping (AGC) threshold.")
-  parser.add_argument("--opt_eps", type=float, default=1e-20, help="Epsilon term for numerical stability in the optimizer.")
+  parser.add_argument("--opt_eps", type=float, default=1e-8, help="Epsilon term for numerical stability in the optimizer.")
   
   # Adam / Momentum specific
   parser.add_argument("--beta_1", type=float, default=0.9, help="The exponential decay rate for the 1st moment estimates.")
@@ -163,6 +168,9 @@ def prepare_experiment_parser():
   parser.add_argument("--print_each", type=int, default=100, help="Print loss every N steps")
   parser.add_argument("--model_save_dir", type=str, default="", help="Directory to save the trained model")
   parser.add_argument("--saved_model_file", type=str, default="", help="File with the complete model. Used for continuing to train it.")
+
+  parser.add_argument("--train_real_policy", action="store_true", help="A flag whether to learn actor on real trajectories also")
+  parser.add_argument("--report_gradnorms", action="store_true", help="Whether to report gradient norms as well as losses.")
 
   parser = add_optimizer_arguments(parser)
 
