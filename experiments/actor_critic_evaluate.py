@@ -24,8 +24,6 @@ parser.add_argument("--restore_step", type=int, default=10000, help="Saved step 
 parser.add_argument("--scale_factor", type=float, default=1.0, help="Scale factor to multiply all rewards by. Useful if the game implementation scaled rewards in a different way than traditional implementations."
                     "Then, this should be the inverse of the game scaling factor. For example, JaxLeduc divides all rewards by 13, so to get values appriopriately scaled as in literature, this should be set to 13.")
 
-parser.add_argument("--use_model_game", action="store_true", help="A flag whether to compute the metrics in the model learned game. If not, they are used in the original game")
-
 experiment_parsers = parser.add_subparsers(dest="experiment_type", required=True, help="Which experiment type to run. Currently available are: loaded"
                                           "evaluate best responses against, or expected values of particular loaded model, or all models in the directory if restore_step is -1" \
                                           "nash: evaluate expected values of the model, best response values against it and also of a saved reference nash equilibrium strategy.")
@@ -523,7 +521,7 @@ def test_loaded(args):
       else:
         algorithm_str = "Actor-critic"
         plot_subdir_str = "joint"
-      game = DreamerModelGame(model) if args.use_model_game else model.game
+      game = DreamerModelGame(model) if not model.optimizer.model.is_iig else model.game
       first=False
     else:
       temp_model = load_model(model_path)
@@ -538,7 +536,7 @@ def test_loaded(args):
       #TODO: This forces reinitalization and retracing of the game jits.
       # But, we actually do need to retrace the jits, since they are just jax.jit
       # stored with the old parameters, so would produce exactly same results for every run
-      if args.use_model_game:
+      if not model.optimizer.model.is_iig:
         game = DreamerModelGame(model)
       
     print(f"Restored model from {model_path}")
@@ -610,7 +608,7 @@ def test_nash(args, saved_nash_path: str):
   # model = RNaDDreamerJoint(dreamer_model, RNaDConfig())
   assert isinstance(model, DreamerMA), f"The loaded model should be an instance of DreamerMA. Instead got {model.__class__}"
   
-  game = DreamerModelGame(model) if args.use_model_game else  model.game
+  game = DreamerModelGame(model) if not model.optimizer.model.is_iig else  model.game
   p1_nash_val, p2_nash_val, nash_iset_map, nash_behaviorals = load_model(nash_path)
   print(f"Loaded nash policies of game with game value {p1_nash_val} (from player 1 perspective)")
   model_map, model_behaviorals = extract_model_policy(model, game)
@@ -626,7 +624,6 @@ def test_nash(args, saved_nash_path: str):
   model_p1_val, model_p2_val = policy_expected_value(game, (model_map, model_behaviorals))
   model_p1_val, model_p2_val = args.scale_factor * model_p1_val, args.scale_factor * model_p2_val
   print(f"Model values {model_p1_val}, {model_p2_val}")
-  jax.debug.breakpoint()
   p2_br_val, p1_br_val, p1_br, p2_br = model_best_response(model, game)
   p1_br_val, p2_br_val = args.scale_factor * p1_br_val, args.scale_factor * p2_br_val
   print(f"P2 best response value against p1: {p2_br_val}")

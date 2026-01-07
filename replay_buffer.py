@@ -54,7 +54,10 @@ class ReplayBuffer():
     """Circular replay buffer for collecting trajectories from the game for dreamer.
     Individual elements are trajectories."""
     self.game = game
-    self.np_rng = np.random.default_rng(seed=seed)
+    #self.np_rng = np.random.default_rng(seed=seed)
+    #The DreamerV3 reference always uses seed 0 for
+    # the sampling
+    self.np_rng = np.random.default_rng(seed=0)
     self.config = config
     self.wm_config = world_model_config
     self.stoch_state_sample_threshold = stoch_state_sample_threshold

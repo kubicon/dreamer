@@ -56,26 +56,35 @@ def check_state_one_outcome(model: DreamerMA, carry:WalkCarry, eps:float, verbos
   differences[0] = p1_iset_max_difference
   if p1_iset_max_difference >= eps:
     mistake_probs[0] = det_prob
-    #print(f"Real iset and decoded iset for player 1 differ by more than {eps}.")
-    #print(f"Max difference {p1_iset_max_difference}")
+    if verbose:
+      print(f"Real iset and decoded iset for player 1 differ by more than {eps}.")
+      print(f"Max difference {p1_iset_max_difference}")
+      print(f"Real iset: {carry.obs[0]}")
+      print(f"Decoded iset: {p1_decoded_iset}")
   differences[1] = p2_iset_max_difference
   if p2_iset_max_difference >= eps:
     mistake_probs[1] = det_prob
-    #print(f"Real iset and decoded iset for player 2 differ by more than {eps}.")
-    #print(f"Max difference {p2_iset_max_difference}")
+    if verbose:
+      print(f"Real iset and decoded iset for player 2 differ by more than {eps}.")
+      print(f"Max difference {p2_iset_max_difference}")
+      print(f"Real iset: {carry.obs[1]}")
+      print(f"Decoded iset: {p2_decoded_iset}")
   differences[2] = int(pred_terminal != carry.terminal)
   if pred_terminal != carry.terminal:
     mistake_probs[2] = det_prob
-    #print(f"Predicted terminal {pred_terminal} does not match real terminal {carry.terminal}. ")
+    if verbose:
+      print(f"Predicted terminal {pred_terminal} does not match real terminal {carry.terminal}. ")
   differences[3] = reward_difference
   if reward_difference >= eps:
     mistake_probs[3] = det_prob
-    #print(f"Predicted reward {pred_reward} differs from real reward {carry.reward} by more than {eps}.")
+    if verbose:
+      print(f"Predicted reward {pred_reward} differs from real reward {carry.reward} by more than {eps}.")
   #Do not check legal actions in terminal states
   differences[4] = int(legal_diference)
   if legal_diference:
     mistake_probs[4] = det_prob
-    #print(f"Predicted legal actions {pred_legal} do not match real legal actions {carry.legals}.")
+    if verbose:
+      print(f"Predicted legal actions {pred_legal} do not match real legal actions {carry.legals}.")
   #Ordered p1_iset, p2_iset, terminal, reward, legals
   #print(f"Mistake probs {mistake_probs}")
   return mistake_probs, differences

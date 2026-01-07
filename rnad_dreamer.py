@@ -300,7 +300,7 @@ class RNaDDreamer():
       #Unlike World model, we operate with rewards defined 
       # as (state, action, next_state) and only care how to
       # act in non-terminal states, hence we end one turn before terminal
-      num_last = game.max_trajectory_lenght_no_chance()
+      num_last = game.max_trajectory_lenght_no_chance() - 1
     self.num_last = num_last
 
     self.return_range = jnp.array(0)
@@ -456,7 +456,7 @@ class RNaDDreamer():
       """Choose a starting point that is not invalid or terminal in the timestep
       uniformly. Chooses over the trajectory dimension and should be 
       vmaped over the batch dimension"""
-      expanded_valid = timestep.valid[..., None, None] * ~timestep.terminal[..., None, None]
+      expanded_valid = timestep.valid[..., None, None]
       #We also need to compute the importance sampling
       # for the player reaches, since we do not start at
       # the beggining of the trajectory.
@@ -466,7 +466,10 @@ class RNaDDreamer():
       timestep_joint_pi = jnp.prod(timestep_pi, axis=-2, keepdims=True)
       #[T, Pl, 1]
       network_pi = jnp.sum(network_pi * timestep.action, axis=-1, keepdims=True) * expanded_valid + (1 - expanded_valid)
-      trajectory_is = network_pi / timestep_joint_pi
+      
+      #Make sure to shift it in time, since this gives
+      # us the reaches for the next state
+      trajectory_is = jnp.concatenate([jnp.ones((1, *network_pi.shape[1:])), network_pi[:-1] / timestep_joint_pi[:-1]], axis=0)
       
       #[T, Pl, 1]
       start_reaches_is = jnp.cumprod(trajectory_is, axis=0)
@@ -481,11 +484,15 @@ class RNaDDreamer():
       #Per trajectory and batch dimensions
     vectorized_net_apply = nnx.vmap(nnx.vmap(per_player_net_apply, in_axes=(None, 0, 0), out_axes=(0)), in_axes=(None, 0, 0), out_axes=(0))
     
+    
+    rnad_timestep = wm_timestep_to_timestep(wm_timestep, wm_prediction_step, self.is_iig)   
     #TODO: This will be called again in the real loss. Cannot get rid of the
     # redundant call somehow?
-    timestep_pi, _, _, _ = vectorized_net_apply(optimizer.model.actor_critic, wm_timestep.obs, wm_timestep.legal)
-    starting_points, start_reaches_is = vectorized_starting_point(jax.lax.stop_gradient(timestep_pi), wm_timestep, wm_prediction_step)
+    timestep_pi, _, _, _ = vectorized_net_apply(optimizer.model.actor_critic, rnad_timestep.obs, rnad_timestep.legal)
+    starting_points, start_reaches_is = vectorized_starting_point(jax.lax.stop_gradient(timestep_pi), 
+                                                                  rnad_timestep, jax.tree.map(lambda x: x[:-1], wm_prediction_step))
     
+
     #Flatten the [n_last, batch] into n_last * batch
     starting_points = jax.tree.map(lambda x: jnp.reshape(x, (-1, *x.shape[2:])), starting_points)
     #For the reaches just add a leading 1 dimension for shape consistency
@@ -500,9 +507,7 @@ class RNaDDreamer():
     
 
     img_loss, (new_range, img_metrics) = img_return
-    optimizer.update(igrad)
-
-    rnad_timestep = wm_timestep_to_timestep(wm_timestep, wm_prediction_step, self.is_iig)                                   
+    optimizer.update(igrad)                                
     r_return, rgrad = nnx.value_and_grad(real_loss, argnums=(0), has_aux=True)(
       optimizer.model,
       target_optimizer.model,

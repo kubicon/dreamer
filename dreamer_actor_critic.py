@@ -125,9 +125,6 @@ class DreamerActorCritic():
     #If negative, take all for unroll, the Dreamer trajectories
     # will have one more timestep, hence + 1
     if num_last <= 0:
-      #Unlike World model, we operate with rewards defined 
-      # as (state, action, next_state) and only care how to
-      # act in non-terminal states, hence we end one turn before terminal
       num_last = game.max_trajectory_lenght_no_chance()
     self.num_last = num_last
 
@@ -139,7 +136,7 @@ class DreamerActorCritic():
       self.metrics_keys.append('real_policy')
     self.metrics = {k: 0 for k in self.metrics_keys}
     self.grad_norms = {'img': {}, 'real': {}}
-    self.network_keys = ma_rssm.network_names[-2]
+    self.network_keys = (ma_rssm.network_names[-2], )
   
     
   
@@ -244,6 +241,7 @@ class DreamerActorCritic():
         return beta_real * loss_val, (new_range, metrics)
       
     
+    ac_timestep = wm_timestep_to_timestep(wm_timestep, wm_prediction_step, self.is_iig)  
     starting_points = jax.tree.map(lambda x: x[-self.num_last: ].reshape((-1, *x.shape[2:])), wm_prediction_step)
     #starting_points = jax.tree.map(lambda x: x[0].reshape((-1, *x.shape[2:])), wm_prediction_step)
     #jax.tree.map(lambda x: print(x.shape), starting_points)
@@ -256,8 +254,7 @@ class DreamerActorCritic():
       self.config.beta_imagination)
     
     img_loss, (new_range, img_metrics) = img_return
-    optimizer.update(igrad)
-    ac_timestep = wm_timestep_to_timestep(wm_timestep, wm_prediction_step, self.is_iig)             
+    optimizer.update(igrad)           
     r_return, rgrad = nnx.value_and_grad(real_loss, argnums=(0), has_aux=True)(
       optimizer.model,
       target_optimizer.model,

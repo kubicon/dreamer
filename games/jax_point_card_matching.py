@@ -152,7 +152,7 @@ class PointCardMatchingStochastic(JaxGame):
     self.chance_outcomes = self.num_cards - self.chance_turn
 
   def initialize_structures(self):
-    init_chance = self.chance_turn == 0
+    init_chance = jnp.array(self.chance_turn == 0)
     init_played_cards = jnp.zeros((self.max_turns, self.num_cards))
     init_points = jnp.zeros(1)
     init_point_cards = jnp.concatenate([jax.nn.one_hot(self.num_cards - 1, self.num_cards)[None, ...], jnp.zeros((self.num_cards - 1, self.num_cards))], axis=0)
@@ -267,7 +267,7 @@ class PointCardMatchingStochastic(JaxGame):
   
   @functools.partial(jax.jit, static_argnums=(0))
   def get_outcomes_and_probs(self, game_state:PointCardMatchingStochasticState) -> tuple[PointCardMatchingStochasticState, chex.Array, chex.Array]:
-    outcomes = jnp.arange(self.num_cards)
+    outcomes = jnp.stack([jax.nn.one_hot(0, self.num_cards), jnp.arange(self.num_cards)], axis=-1)
     def invalid_probs(game_state):
       return jnp.zeros(self.num_cards)
     def chance_probs(game_state: PointCardMatchingStochasticState):
@@ -284,6 +284,8 @@ class PointCardMatchingStochastic(JaxGame):
   
   @functools.partial(jax.jit, static_argnums=(0))
   def apply_action(self, state: PointCardMatchingStochasticState, actions):
+    #print(f"Actions shape : {actions.shape}")
+    #jax.debug.breakpoint()
     return jax.lax.cond(state.is_chance, self.apply_action_chance, self.apply_action_no_chance, state, actions)
 
 

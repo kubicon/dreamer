@@ -167,7 +167,7 @@ class JaxStochasticRPS(JaxGame):
     #The p1 points span range [-2, ..., 2], so ve need to represent 5 values 
     p1_points_oh = jax.nn.one_hot(game_state.p1_points + 2, 5)
     game_played_oh = jax.nn.one_hot(game_state.game_type, self.game_types)
-    state_tensor = jnp.concatenate([terminal_oh.ravel(), p1_points_oh.ravel(), game_played_oh.ravel()], axis=0)
+    state_tensor = jnp.concatenate([terminal_oh.ravel(), p1_points_oh.ravel(), game_played_oh], axis=0)
     state_tensor = jnp.where(game_state.is_chance, jnp.zeros_like(state_tensor), state_tensor)
     p1_iset_tensor = jnp.concatenate([jax.nn.one_hot(0, 2), state_tensor], axis=0)
     p2_iset_tensor = jnp.concatenate([jax.nn.one_hot(1, 2), state_tensor], axis=0)
