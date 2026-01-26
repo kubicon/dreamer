@@ -212,7 +212,9 @@ class DreamerMA():
     self.actor_critic.step(timestep, pred_step, ac_key)
     self.learner_steps += 1
 
-  def train_model(self, model_save_dir:str, num_steps:int, print_each: int = -1, save_each: int = -1, save_first: bool = False):
+  def train_model(self, model_save_dir:str, num_steps:int, print_each: int = -1, 
+                  save_each: int = -1,
+                  save_first: bool = False):
     print(f"Training model that is saved at {model_save_dir}")
     if save_first:
       model_file = model_save_dir + f"step_{self.learner_steps}.pkl"
@@ -233,6 +235,7 @@ class DreamerMA():
       if save_each > 0 and self.learner_steps % save_each == 0:
         model_file = model_save_dir + f"step_{self.learner_steps}.pkl"
         save_model(self, model_file)
+    self.buffer.plot_returns(model_save_dir)
    
   def __getstate__(self):
     

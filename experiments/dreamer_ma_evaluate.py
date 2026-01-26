@@ -170,12 +170,13 @@ def model_walk_test(model:DreamerMA,
     #print(f"Joint actions: {joint_actions}")
     for a in joint_actions:
       #print(f"Applying action {a}")
+      action_prob = np.prod(pi[np.arange(a.shape[0]), a])
       action_parent = parent
       if visualise_tree:
         action_path = parent.name + f"a{a}"
         action_node = Node(action_path,
                          parent = action_parent,
-                         data = {"type": PAST_ACTION, "action": a})
+                         data = {"type": PAST_ACTION, "action": a, "prob": action_prob})
         action_parent = action_node
       next_state, next_terminal, next_reward, next_legals = model.game.apply_action(carry.game_state, a)
       ai_oh = jax.nn.one_hot(a, carry.legals.shape[-1])

@@ -8,7 +8,7 @@ import time
 import matplotlib.pyplot as plt
 
 
-from train_utils import load_model
+from train_utils import load_model, uniform_policy
 from experiments.eval_utils import cartesian_product, stringify, find_closest_index, create_iset_map, unroll_chance_node
 from games.jax_game import JaxGame, GameState
 from games.model_game import DreamerModelGame, ModelGameState
@@ -34,10 +34,11 @@ loaded_parser.add_argument("--metric", type=str, default="br", choices=("br", "e
 nash_parser = experiment_parsers.add_parser(name="nash", help="Evaluate expected values of the model, best response values against it and also of a saved reference nash equilibrium strategy.")
 nash_parser.add_argument("--nash_strategy_path", type=str, default="experiments/goofspiel_nash.pkl", help="Path to the saved nash strategy in pickle format. Must be formatted as a tuple of behavioral strategies per tree depth and iset map per tree_depth.")
 
-def extract_model_policy(model: DreamerMA, game: JaxGame | DreamerModelGame)-> tuple[list, list]:
+def extract_model_policy(model: DreamerMA, game: JaxGame | DreamerModelGame, uniform=False)-> tuple[list, list]:
   """Extracts policies for the whole game from the RNaD model and 
   returns them as per depth
-  iset map and behavioral policies."""
+  iset map and behavioral policies. Can also instead
+   create a uniform policy, if the uniform=True option is provided"""
   depth_behaviorals = []
   depth_iset_map = []
   game_actions = game.num_distinct_actions()
@@ -51,8 +52,11 @@ def extract_model_policy(model: DreamerMA, game: JaxGame | DreamerModelGame)-> t
   vectorized_is_chance = jax.vmap(game.is_chance, in_axes=0, out_axes=0)
   vectorized_chance_info = jax.vmap(game.get_outcomes_and_probs, in_axes=0, out_axes=(0, 0))
   #vmap over the H(D) dimension first and then over the player dimension
-  vectorized_get_policy = MARSSM.vmap_over_net(ma_rssm.policy_net(), in_axes=[(0, 0), (0, 0)], out_axes=[0, 0])
-  #vectorized_get_policy = nnx.vmap(nnx.vmap(uniform_policy, in_axes=(0, 0), out_axes=0), in_axes=(0, 0), out_axes=0)
+  if uniform:
+    vectorized_get_policy = jax.vmap(jax.vmap(uniform_policy, in_axes=(0, 0), out_axes=0), in_axes=(0, 0), out_axes=0)
+  else:
+    vectorized_net = MARSSM.vmap_over_net(ma_rssm.policy_net(), in_axes=[(0, 0), (0, 0)], out_axes=[0, 0])
+    vectorized_get_policy = lambda x, y : vectorized_net(x, y)[0]
   def _tree_walk(game_states: GameState, legals_non_padded: jax.Array, depth=0):
      # Denoting this as A(D)
     max_actions = max(game.depth_chance_outcomes(depth), game_actions)
@@ -92,7 +96,7 @@ def extract_model_policy(model: DreamerMA, game: JaxGame | DreamerModelGame)-> t
     p1_legal, p2_legal = legals[0], legals[1]
     legal = p1_legal[..., None] * p2_legal[..., None, :]
 
-    pi = vectorized_get_policy(jnp.asarray(iset_map), jnp.asarray(iset_legal))[0]
+    pi = vectorized_get_policy(jnp.asarray(iset_map), jnp.asarray(iset_legal))
     
     
     p1_actions = np.reshape(np.tile(np.repeat(np.arange(max_actions), max_actions), curr_iset.shape[1]), (curr_iset.shape[1], -1))
@@ -477,13 +481,26 @@ def model_best_response(model: DreamerMA, game: JaxGame | DreamerModelGame, cust
     state_value = np.where(depth_is_chance[d][None, ...], np.stack((p1_chance_weighted_value, p2_chance_weighted_value), axis=0), np.stack((p1_history_value, p2_history_value), 0))
   state_value = state_value.squeeze(-1)
   return state_value[1], state_value[0], p1_br, p2_br
-   
+
+# def trajectory_return(model: DreamerMA):
+#   """Simplest test, just a trajectory return in the real environment"""
+#   game = model.game
+#   state, legals = game.initialize_structures()
+#   key = model.jax_rngs
+#   ret = 0
+#   for i in range(game.max_trajectory_lenght_no_chance()):
+#     if game.is_chance(state):
+#       key, chance_sample_key = jax.random.split(key)
+#       outcomes, probs = game.get_outcomes_and_probs(state)
+#       o = jax.random.choice(chance_sample_key, outcomes, p=probs)
+#       state, terminal, reward, legals = game.apply_action(state, o)
+#     key, action_key = jax.random.split(key)
+    
 
 
 def test_loaded(args):
   model_dir = args.model_dir
-  p1_metrics = []
-  p2_metrics = []
+  metrics = []
   steps = []
   if not model_dir.startswith("/"):
     model_dir = os.getcwd() + "/" + model_dir
@@ -496,6 +513,7 @@ def test_loaded(args):
   first = True
   model = None
   game = None
+  uniform_nash_conv = 0
   plot_subdir_str = "joint"
   algorithm_str = "RNaD"
   for filename in os.listdir(model_dir):
@@ -519,9 +537,13 @@ def test_loaded(args):
       if model.use_rnad:
         plot_subdir_str = "joint_rnad"
       else:
-        algorithm_str = "Actor-critic"
+        algorithm_str = "Reinforce"
         plot_subdir_str = "joint"
       game = DreamerModelGame(model) if not model.optimizer.model.is_iig else model.game
+      uniform_map, uniform_behaviorals = extract_model_policy(model, game, uniform=True)
+      uniform_p1_br_val, uniform_p2_br_val, _, _ = model_best_response(model, game, custom_policy = (uniform_map, uniform_behaviorals))
+      uniform_nash_conv = args.scale_factor * (uniform_p1_br_val + uniform_p2_br_val)
+      
       first=False
     else:
       temp_model = load_model(model_path)
@@ -541,13 +563,13 @@ def test_loaded(args):
       
     print(f"Restored model from {model_path}")
     if args.metric == "br":
-      p1_metric, p2_metric, p1_br, p2_br = model_best_response(model, game)
+      p1_br_val, p2_br_val, p1_br, p2_br = model_best_response(model, game)
+      metric = p1_br_val + p2_br_val
     else:
       model_map_and_behaviorals = extract_model_policy(model, game)
-      p1_metric, p2_metric = policy_expected_value(game, model_map_and_behaviorals)
-    p1_metric, p2_metric = args.scale_factor * p1_metric, args.scale_factor * p2_metric
-    p1_metrics.append(p1_metric)
-    p2_metrics.append(p2_metric)
+      metric, _ = policy_expected_value(game, model_map_and_behaviorals)
+    metric = args.scale_factor * metric
+    metrics.append(metric)
     steps.append(step)
   print("Ended evaluation")
   print(f"Evaluation took {time.time() - start_time:.2f} seconds.")
@@ -557,26 +579,24 @@ def test_loaded(args):
     raise FileNotFoundError(f"Model directory {model_dir} and restore step {args.restore_step}. Did not find any file. Make sure"
                             " the directory contains a file in a form of step_restore_step.pkl, "
                             "where restore_step is either the specified number, or arbitrary integer if -1.")
-  p1_metrics = np.asarray(p1_metrics)
+  metrics = np.asarray(metrics)
   steps = np.asarray(steps)
-  p2_metrics = np.asarray(p2_metrics)
   sort_indices = np.argsort(steps)
-  sorted_p1_metrics = p1_metrics[sort_indices]
+  sorted_metrics = metrics[sort_indices]
   sorted_steps = steps[sort_indices]
-  sorted_p2_metrics = p2_metrics[sort_indices]
 
   fig, ax = plt.subplots()
-  metric_str = "exploitability" if args.metric == "br" else "expected_utility"
-  plot_title = "Exploitability" if args.metric == "br" else "Expected utility"
+  metric_str = "nashconv" if args.metric == "br" else "expected_utility"
+  plot_title = "NashConv" if args.metric == "br" else "Expected utility"
   if args.metric == "expected_util":
-    ax.plot(sorted_steps, sorted_p1_metrics, label=f"Player 1 expected_utility")
+    ax.plot(sorted_steps, sorted_metrics, label=f"Player 1 expected_utility")
   else:
-    ax.plot(sorted_steps, sorted_p1_metrics, label=f"Player 1 {metric_str}")
-    ax.plot(sorted_steps, sorted_p2_metrics, label=f"Player 2 {metric_str}")
+    ax.plot(sorted_steps, sorted_metrics, label=f"NashConv")
+    ax.plot(sorted_steps, np.repeat(uniform_nash_conv, sorted_steps.size), linestyle='dashed', label="Uniform policy NashConv")
   ax.legend()
   ax.set_xlabel("Training step")
   ax.set_ylabel(plot_title)
-  ax.set_title(f"{plot_title} of Dreamer {algorithm_str}")
+  ax.set_title(f"{plot_title} of NashDreamer {algorithm_str}")
   empty = ""
   game_params = model.game.params_dict()
   params_str = f'{empty.join(f"_{value}" for key, value in game_params.items())}'

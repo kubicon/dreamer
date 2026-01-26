@@ -51,6 +51,9 @@ def add_wm_arguments(parser: ArgumentParser) ->ArgumentParser:
   parser.add_argument("--buffer_size", type=int, default=32, help="Size of the replay buffer.")
   parser.add_argument("--replay_ratio", type=int, default=-1, help="The replay ratio, which defines the amount of online steps per minibatch. Respectively, the ratio is replay_ratio / (batch_size * trajectory_len). If -1, only online trajectories are sampled")
   parser.add_argument("--on_policy", action="store_true", help="A flag whether to use the actor policy for trajectory sampling. If not, uniform policy is used instead.")
+  parser.add_argument("--return_log_frequency", type=int, default=10, help="How often to log trajectory return in the replay buffer in terms of collected minibatches")
+  parser.add_argument("--smoothing_window", type=int, default=32, help="How many returns to use for the running average window")
+  parser.add_argument("--plot_returns", action="store_true", help="A flag whether to plot the smoothed returns. They will be stored in the same directory as the model.")
   ## Loss function coefficients
   parser.add_argument("--beta_prediction", type=float, default=1, help="The beta coefficient for the prediction loss")
   parser.add_argument("--beta_dynamics", type=float, default=1, help="The beta coefficient for the dynamics loss")

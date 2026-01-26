@@ -63,7 +63,10 @@ def joint_train_loop(args, game:JaxGame):
     
     buffer_config = BufferConfig(buffer_size = args.buffer_size,
                                  on_policy = args.on_policy,
-                                 replay_ratio = args.replay_ratio)
+                                 replay_ratio = args.replay_ratio,
+                                 smoothing_window = args.smoothing_window,
+                                 plot_returns = args.plot_returns,
+                                 return_log_frequency = args.return_log_frequency)
     opt_config = OptimizerConfig(lr = args.lr,
                                        agc = args.agc,
                                        eps = args.opt_eps,

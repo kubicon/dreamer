@@ -1,7 +1,9 @@
 import jax
+import os
 import jax.numpy as jnp
 import chex
 import numpy as np
+import matplotlib.pyplot as plt
 
 import flax.nnx as nnx
 from dataclasses import dataclass
@@ -69,11 +71,11 @@ class ReplayBuffer():
     self.action_dimension = self.game.num_distinct_actions()
     self.num_players = self.game.num_players()
     self.trajectory_max = self.game.max_trajectory_length()
-    hidden_state_size = self.wm_config.sequential_network_details[0]
+    recurrent_state_size = self.wm_config.sequential_network_details[0]
 
-    if hidden_state_size < 1:
-      hidden_state_size = self.num_players * self.game.information_state_tensor_shape()
-    self.hidden_state_size = hidden_state_size
+    if recurrent_state_size < 1:
+      recurrent_state_size = self.num_players * self.game.information_state_tensor_shape()
+    self.recurrent_state_size = recurrent_state_size
     #Chance nodes are not explicitly stored in the buffer, instead
     # they are skipped and only the next outcome sampled from it 
     # is stored.
@@ -82,21 +84,26 @@ class ReplayBuffer():
     self.use_iset = self.game.information_type() == InformationType.IIG or self.wm_config.use_original_iset
     self._get_example_timestep()
 
+    self.total_minibatch_size = self.wm_config.batch_size * self.non_chance_trajectory_max
     #If we supply replay ratio < 1, it is assumed
     # that we want all steps online
     if self.config.replay_ratio < 1:
       self.online_batches = self.wm_config.batch_size
       self.replayed_batches = 0
     else:
-      total_minibatch_size = self.wm_config.batch_size * self.non_chance_trajectory_max
+      assert self.total_minibatch_size % self.config.replay_ratio == 0, f"Total size of minibatch {self.non_chance_trajectory_max}x{self.config.batch_size} is not divisible by replay ratio {self.config.replay_ratio}."
 
-      assert total_minibatch_size % self.config.replay_ratio == 0, f"Total size of minibatch {self.non_chance_trajectory_max}x{self.config.batch_size} is not divisible by replay ratio {self.config.replay_ratio}."
-
-      online_steps_per_batch = int(total_minibatch_size / self.config.replay_ratio)
+      online_steps_per_batch = int(self.total_minibatch_size / self.config.replay_ratio)
 
       assert online_steps_per_batch % self.non_chance_trajectory_max == 0, f"The amount of online steps per batch {online_steps_per_batch} needs to be divisible into trajectories of lenght {self.non_chance_trajectory_max}."
       self.online_batches = int(online_steps_per_batch / self.non_chance_trajectory_max)
       self.replayed_batches = self.wm_config.batch_size - self.online_batches
+    
+    self.smoothed_returns = []
+    self.smoothing_rewards = np.zeros(self.config.smoothing_window)
+    self.smoothing_idx = 0
+    self.smoothing_full = False
+    self.minibatches = 0
 
     self.cached_sample = None
   
@@ -239,10 +246,57 @@ class ReplayBuffer():
       assert self.cached_sample is not None, "The variant of add_batch where one or more of the networks are unset was called, but cached_sample is not set. Please call cache_sampling first."
       batch_trajectories = self.cached_sample(batch_size, sample_key)
     buffer_timestep = self.env_to_buffer_timestep(batch_trajectories)
+    rewards = np.sum(buffer_timestep.reward, axis=1)
+    if self.wm_config.batch_size + self.smoothing_idx < self.config.smoothing_window:
+      self.smoothing_rewards[self.smoothing_idx: self.smoothing_idx + self.wm_config.batch_size] = rewards
+      self.smoothing_idx += self.wm_config.batch_size
+    elif self.config.smoothing_window <= self.wm_config.batch_size:
+      self.smoothing_rewards = rewards[-self.config.smoothing_window:]
+      self.smoothing_full = True
+    else:
+      space_left = self.config.smoothing_window - self.smoothing_idx
+      self.smoothing_rewards[self.smoothing_idx:] = rewards[:space_left]
+      remaining_items = self.wm_config.batch_size - space_left
+      self.smoothing_rewards[:remaining_items] = rewards[space_left:]
+      self.smoothing_idx = remaining_items
+      self.smoothing_full = True
+    self.minibatches += 1
+    if self.config.return_log_frequency > 0 and self.minibatches % self.config.return_log_frequency == 0:
+        if self.smoothing_full:
+          self.smoothed_returns.append(self.smoothing_rewards.mean())
+        else:
+          self.smoothed_returns.append(self.smoothing_rewards[:self.smoothing_idx].mean())
     for i in range(batch_size):
       self.add_single(buffer_timestep[i])
     return batch_trajectories
+  
+  def plot_returns(self, plot_dir: str):
+    if not self.config.plot_returns:
+      return
+    if not self.smoothed_returns:
+        print("No returns to plot.")
+        return
+    os.makedirs(plot_dir, exist_ok=True)
 
+    plt.figure(figsize=(10, 6))
+    
+    # Generate X-axis (Total Trajectories)
+    # We know we log every 'return_log_frequency' trajectories
+    x_axis = np.arange(len(self.smoothed_returns)) * self.total_minibatch_size * self.config.return_log_frequency
+    
+    plt.plot(x_axis, self.smoothed_returns, 
+             label=f'Smoothed return with rolling average over {self.config.smoothing_window} trajectories',
+               color='blue', linewidth=2)
+    
+    plt.xlabel('Env steps')
+    plt.ylabel('Average Return')
+    plt.title('NashDreamer obtained returns')
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.savefig(f'{plot_dir}environment_returns.png')
+    plt.close() 
 
   def sample_batch(self, batch_size: int) ->TimeStep:
     #empty buffer
@@ -287,7 +341,10 @@ class ReplayBuffer():
     #TODO: Will later have to properly split the segments 
     # and also store the starting model state
     game_state, legal_actions = self.game.initialize_structures()
-    init_hidden = jnp.zeros(self.hidden_state_size)
+    dummy_deter = jnp.zeros((self.wm_config.encoded_classes, self.wm_config.encoded_categories))
+    dummy_rec = jnp.zeros(self.recurrent_state_size)
+    dummy_action = jnp.zeros((self.game.num_players(), self.game.num_distinct_actions()))
+    init_hidden = recurrent_network(dummy_rec, dummy_deter, dummy_action)
     
     @chex.dataclass(frozen=True)
     class SampleTrajectoryCarry:

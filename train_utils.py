@@ -67,7 +67,12 @@ class BufferConfig:
   buffer_size: int
   on_policy: bool
   replay_ratio: int = -1 #How many steps should be collected from the replay buffer per
-                          # online collected env step 
+                          # online collected env step
+
+  #For plotting returns
+  return_log_frequency: int = 10
+  smoothing_window: int = 50
+  plot_returns: bool = False
 
 @chex.dataclass(frozen=True)
 class RNaDConfig:

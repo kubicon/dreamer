@@ -26,11 +26,11 @@ def custom_edge_style(parent: Node, child: Node):
     if node_type == PAST_ACTION:
         if not "action" in child_data:
             raise ValueError(f"Child data for post action node should contain action field, but it does not. Got {child_data}")
-        label = f"A: {child_data["action"]}"
+        label = f"A: {child_data["action"]}, P: {float(child_data['prob']):.3f}"
     else:
         if not "prob" in child_data:
             raise ValueError(f"Child data for non-action node should contain prob field, but it does not. Got {child_data}")
-        label = f"P: {child_data["prob"]}"
+        label = f"P: {float(child_data["prob"]):.3f}"
     attributes = {"label": label}
     # Convert the attributes dictionary to a DOT string format
     return ', '.join([f'{k}="{v}"' for k, v in attributes.items()])
