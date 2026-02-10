@@ -14,6 +14,8 @@ from replay_buffer import ReplayBuffer
 from dreamer_actor_critic import DreamerActorCritic
 from rnad_dreamer import RNaDDreamer
 
+LATEST_STEP_FILENAME = "latest.txt"
+
 
 
 class DreamerMA():
@@ -206,7 +208,6 @@ class DreamerMA():
     buffer_key = self.generate_key()
     timestep = self.buffer.mixed_sample(buffer_key)
     wm_key = self.generate_key()
-    #wm_loss, pred_step = self.wm_cached_train(timestep, wm_key)
     wm_loss, pred_step, self.wm_metrics, self.grad_norms = self.update_world_model(self.optimizer, timestep, wm_key)
     ac_key = self.generate_key()
     self.actor_critic.step(timestep, pred_step, ac_key)
@@ -215,10 +216,15 @@ class DreamerMA():
   def train_model(self, model_save_dir:str, num_steps:int, print_each: int = -1, 
                   save_each: int = -1,
                   save_first: bool = False):
+    
+    
     print(f"Training model that is saved at {model_save_dir}")
+    latest_step = -1
     if save_first:
       model_file = model_save_dir + f"step_{self.learner_steps}.pkl"
+      latest_step = self.learner_steps
       save_model(self, model_file)
+    
     #Start the training by sampling into the buffer,
     # to ensure that there are distinct data for at least one step
     init_batch_key = self.generate_key()
@@ -233,9 +239,15 @@ class DreamerMA():
         if self.ac_config.report_gradnorms:
           print(f"Actor critic gradnorms {self.actor_critic.grad_norms}")
       if save_each > 0 and self.learner_steps % save_each == 0:
+        latest_step = self.learner_steps
         model_file = model_save_dir + f"step_{self.learner_steps}.pkl"
         save_model(self, model_file)
-    self.buffer.plot_returns(model_save_dir)
+    self.buffer.store_returns(model_save_dir)
+    #Save which model file is the latest
+    if latest_step > 0:
+      latest_step_file = model_save_dir + LATEST_STEP_FILENAME
+      with open(latest_step_file, 'w') as f:
+        f.write(f"step_{latest_step}.pkl")
    
   def __getstate__(self):
     

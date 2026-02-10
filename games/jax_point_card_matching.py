@@ -60,7 +60,7 @@ class PointCardMatching(JaxGame):
     return self.max_turns
   
   def game_name(self):
-    return "point_card_matching_mp"
+    return "pcm"
   
   def params_dict(self):
     return {"num_cards": self.num_cards}
@@ -189,7 +189,7 @@ class PointCardMatchingStochastic(JaxGame):
     return self.num_cards
   
   def game_name(self):
-    return "point_card_matching_stochastic_mp"
+    return "pcm_stochastic"
   
   def params_dict(self):
     return {"num_cards": self.num_cards, "chance_turn": self.chance_turn}

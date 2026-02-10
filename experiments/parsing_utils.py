@@ -53,7 +53,7 @@ def add_wm_arguments(parser: ArgumentParser) ->ArgumentParser:
   parser.add_argument("--on_policy", action="store_true", help="A flag whether to use the actor policy for trajectory sampling. If not, uniform policy is used instead.")
   parser.add_argument("--return_log_frequency", type=int, default=10, help="How often to log trajectory return in the replay buffer in terms of collected minibatches")
   parser.add_argument("--smoothing_window", type=int, default=32, help="How many returns to use for the running average window")
-  parser.add_argument("--plot_returns", action="store_true", help="A flag whether to plot the smoothed returns. They will be stored in the same directory as the model.")
+  parser.add_argument("--log_returns", action="store_true", help="A flag whether to log the smoothed returns. They will be stored in the same directory as the model.")
   ## Loss function coefficients
   parser.add_argument("--beta_prediction", type=float, default=1, help="The beta coefficient for the prediction loss")
   parser.add_argument("--beta_dynamics", type=float, default=1, help="The beta coefficient for the dynamics loss")
@@ -164,13 +164,14 @@ def prepare_experiment_parser():
   distinguishing whether to train with RNaD or
   standard Actor-Critic."""
   parser = ArgumentParser()
-  parser.add_argument("--seed", type=int, default=42, help="RNG seed for the whole algorithm. If -1 a random seed is generated.")
+  parser.add_argument("--seeds", type=str, default='(42, )', help="RNG seeds for the whole algorithm. Supplied as (seed_1, seed_2, ..., seed_n) If -1 a random seed is generated.")
   parser.add_argument("--num_steps", type=int, default=1001, help="Number of training steps")
   parser.add_argument("--save_each", type=int, default=100, help="Save model every N steps")
   parser.add_argument("--save_first", action="store_true", help="A flag whether to save the initial state of the model.")
   parser.add_argument("--print_each", type=int, default=100, help="Print loss every N steps")
   parser.add_argument("--model_save_dir", type=str, default="", help="Directory to save the trained model")
-  parser.add_argument("--saved_model_file", type=str, default="", help="File with the complete model. Used for continuing to train it.")
+  parser.add_argument("--continue_train", action="store_true", help="A flag whether to continue training from the latest stored step. If specified a clean model is trained.")
+  parser.add_argument("--clean_dir", action="store_true", help="A flag whether to first delete the model store directory, if it already exists. Incompatible with continue train and takes precedence over it, if supplied together")
 
   parser.add_argument("--train_real_policy", action="store_true", help="A flag whether to learn actor on real trajectories also")
   parser.add_argument("--report_gradnorms", action="store_true", help="Whether to report gradient norms as well as losses.")
@@ -186,7 +187,5 @@ def prepare_experiment_parser():
   joint_rnad_parser = subparsers.add_parser(name="joint_rnad", help="Train both world model and RNaD as the actor-critic.")
   joint_rnad_parser = add_wm_arguments(joint_rnad_parser)
   joint_rnad_parser = add_rnad_arguments(joint_rnad_parser)
-
-  el_parser = subparsers.add_parser(name="el", help="...")
 
   return parser

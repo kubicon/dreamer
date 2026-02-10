@@ -1,7 +1,7 @@
 import chex
 import jax
+import numpy as np
 import jax.numpy as jnp
-from games.jax_game import GameState 
 import os
 import pickle
 
@@ -69,10 +69,10 @@ class BufferConfig:
   replay_ratio: int = -1 #How many steps should be collected from the replay buffer per
                           # online collected env step
 
-  #For plotting returns
+  #For logging returns
   return_log_frequency: int = 10
   smoothing_window: int = 50
-  plot_returns: bool = False
+  log_returns: bool = False
 
 @chex.dataclass(frozen=True)
 class RNaDConfig:
@@ -389,4 +389,29 @@ def save_model(model, path):
 def load_model(path):
   with open(path, "rb") as f:
     return pickle.load(f)
+  
+  
+def get_seeds(seed_spec:str) ->list[int]:
+  """A helper utility to parse seeds
+  as a list of integers from the string specification
+
+  Args:
+      seeds (str): A string specification of the 
+      seeds to be used of form (seed_1, seed_2, ... , seed_n)
+
+  Returns:
+      list[int]: A list of the integer parsed seeds.
+  """
+  assert seed_spec.startswith('(') and seed_spec.endswith(')'), f"Invalid seed specification {seed_spec}"
+  seed_spec = seed_spec.strip('()').split(',')
+  seeds = []
+  for s in seed_spec:
+    if not s.strip().isdecimal():
+      continue
+    seed = int(s)
+    if seed == -1:
+      seed = np.random.randint(0, 2**32 - 1)
+    seeds.append(seed)
+  assert len(seeds) > 0, f"No valid seed was found in the provided specification {seed_spec}"
+  return seeds
   

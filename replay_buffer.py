@@ -270,33 +270,31 @@ class ReplayBuffer():
       self.add_single(buffer_timestep[i])
     return batch_trajectories
   
-  def plot_returns(self, plot_dir: str):
-    if not self.config.plot_returns:
+  def store_returns(self, store_dir: str):
+    if not self.config.log_returns:
       return
     if not self.smoothed_returns:
-        print("No returns to plot.")
+        print("No returns to log.")
         return
-    os.makedirs(plot_dir, exist_ok=True)
+    os.makedirs(store_dir, exist_ok=True)
 
-    plt.figure(figsize=(10, 6))
     
     # Generate X-axis (Total Trajectories)
     # We know we log every 'return_log_frequency' trajectories
-    x_axis = np.arange(len(self.smoothed_returns)) * self.total_minibatch_size * self.config.return_log_frequency
+    env_steps = np.arange(len(self.smoothed_returns)) * self.total_minibatch_size * self.config.return_log_frequency
     
-    plt.plot(x_axis, self.smoothed_returns, 
-             label=f'Smoothed return with rolling average over {self.config.smoothing_window} trajectories',
-               color='blue', linewidth=2)
+    return_file = store_dir + "env_returns.txt"
     
-    plt.xlabel('Env steps')
-    plt.ylabel('Average Return')
-    plt.title('NashDreamer obtained returns')
-    plt.grid(True, alpha=0.3)
-    plt.legend()
+    with open(return_file, 'w') as f:
+      #The first line contains the game name string
+      f.write(f"{self.game.to_compact_str()}\n")
+      #The second line defines the smoothing
+      # window size (so that it can be written for plotting)
+      f.write(f'Smoothing window: {self.config.smoothing_window}\n')
+      for step, ret in zip(env_steps, self.smoothed_returns):
+        f.write(f"Step: {step}, Return: {ret}\n")
     
-    plt.tight_layout()
-    plt.savefig(f'{plot_dir}environment_returns.png')
-    plt.close() 
+    
 
   def sample_batch(self, batch_size: int) ->TimeStep:
     #empty buffer
@@ -311,6 +309,9 @@ class ReplayBuffer():
     return {
       "numpy_rng_state": self.np_rng.bit_generator.state,
       "full" : self.full,
+      "smoothed_returns" : self.smoothed_returns,
+      "smoothing_idx": self.smoothing_idx,
+      "smoothing_full": self.smoothing_full,
       "buffer_index": self.buffer_index,
       "buffer": self.buffer,
     }
@@ -321,6 +322,9 @@ class ReplayBuffer():
     self.full = state["full"]
     self.buffer_index = state["buffer_index"]
     self.buffer = state["buffer"]
+    self.smoothed_returns = state["smoothed_returns"]
+    self.smoothing_full = state["smoothing_full"]
+    self.smoothing_idx = state["smoothing_idx"]
 
     
     
