@@ -178,13 +178,13 @@ def prepare_experiment_parser():
 
   parser = add_optimizer_arguments(parser)
 
-  subparsers = parser.add_subparsers(dest="train_mode", required=True, help="Which training mode to run. dreamer for Dreamer train, rnad for RNaD train or joint for the joint training loop.")
+  subparsers = parser.add_subparsers(dest="train_mode", required=True, help="Which training mode to run. Either reinforce or rnad")
 
-  joint_parser = subparsers.add_parser(name="joint", help="Train both world model and standard Dreamer Reinforce + TD-learning")
+  joint_parser = subparsers.add_parser(name="reinforce", help="Train both world model and standard Dreamer Reinforce + TD-learning")
   joint_parser = add_wm_arguments(joint_parser)
   joint_parser = add_actor_critic_arguments(joint_parser)
 
-  joint_rnad_parser = subparsers.add_parser(name="joint_rnad", help="Train both world model and RNaD as the actor-critic.")
+  joint_rnad_parser = subparsers.add_parser(name="rnad", help="Train both world model and RNaD as the actor-critic.")
   joint_rnad_parser = add_wm_arguments(joint_rnad_parser)
   joint_rnad_parser = add_rnad_arguments(joint_rnad_parser)
 

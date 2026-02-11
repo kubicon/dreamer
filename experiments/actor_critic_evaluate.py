@@ -142,8 +142,8 @@ def plot_comparison(args):
     
     # Define the two algorithms to compare
     algos = {
-        "Reinforce": [os.path.join(base_path, "joint", game_path, p) for p in seed_paths],
-        "RNaD": [os.path.join(base_path, "joint_rnad", game_path, p) for p in seed_paths]
+        "Reinforce": [os.path.join(base_path, "reinforce", game_path, p) for p in seed_paths],
+        "RNaD": [os.path.join(base_path, "rnad", game_path, p) for p in seed_paths]
     }
     
     results = {k: {} for k in algos}

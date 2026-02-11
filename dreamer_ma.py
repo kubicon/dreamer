@@ -219,11 +219,18 @@ class DreamerMA():
     
     
     print(f"Training model that is saved at {model_save_dir}")
+    def save_latest():
+      #Save which model file is the latest
+      if latest_step > 0:
+        latest_step_file = model_save_dir + LATEST_STEP_FILENAME
+        with open(latest_step_file, 'w') as f:
+          f.write(f"step_{latest_step}.pkl")
     latest_step = -1
     if save_first:
       model_file = model_save_dir + f"step_{self.learner_steps}.pkl"
       latest_step = self.learner_steps
       save_model(self, model_file)
+      save_latest()
     
     #Start the training by sampling into the buffer,
     # to ensure that there are distinct data for at least one step
@@ -242,12 +249,9 @@ class DreamerMA():
         latest_step = self.learner_steps
         model_file = model_save_dir + f"step_{self.learner_steps}.pkl"
         save_model(self, model_file)
+        save_latest()
     self.buffer.store_returns(model_save_dir)
-    #Save which model file is the latest
-    if latest_step > 0:
-      latest_step_file = model_save_dir + LATEST_STEP_FILENAME
-      with open(latest_step_file, 'w') as f:
-        f.write(f"step_{latest_step}.pkl")
+    
    
   def __getstate__(self):
     

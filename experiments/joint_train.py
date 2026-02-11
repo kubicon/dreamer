@@ -64,7 +64,7 @@ def train(args, game: JaxGame):
                                       schedule = args.opt_schedule,
                                       warmup = args.warmup,
                                       anneal = args.anneal)
-  if args.train_mode == "joint_rnad":
+  if args.train_mode == "rnad":
     ac_config = RNaDConfig(
         bin_range = args.ac_bin_range,
         train_real_policy = args.train_real_policy,

@@ -45,7 +45,7 @@ class JaxGame(ABC):
   def __str__(self):
     params_dict = self.params_dict()
     empty = ""
-    params_str = f'{empty.join(f"Param: {key} value: {value}" for key, value in params_dict.items())}' 
+    params_str = empty.join(f"Param: {key} value: {value}" for key, value in params_dict.items())
     return str(self.game_name() + " " + params_str)
   
   def to_compact_str(self):
@@ -53,7 +53,7 @@ class JaxGame(ABC):
     the game, suitable for directory specification"""
     params_dict = self.params_dict()
     empty = ""
-    params_str = f'{empty.join(f'_{value}' for value in params_dict.values())}'
+    params_str = empty.join(f"_{value}" for value in params_dict.values())
     return str(self.game_name() + params_str)
   
   def __repr__(self):
