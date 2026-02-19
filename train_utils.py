@@ -10,24 +10,24 @@ from typing import Sequence, Tuple
   
 
 
-@chex.dataclass(frozen=True)
-class PredictionStep():
-  repr_state: chex.Array
-  decoded_obs: chex.Array
-  reward_dist_logit: chex.Array
-  done_logit: chex.Array
-  dynamics_state: chex.Array
+# @chex.dataclass(frozen=True)
+# class PredictionStep():
+#   repr_state: chex.Array
+#   decoded_obs: chex.Array
+#   reward_dist_logit: chex.Array
+#   done_logit: chex.Array
+#   dynamics_state: chex.Array
 
 @chex.dataclass(frozen=True)
 class PredictionStepWithLegal():
-  recurrent_state: chex.Array
-  repr_state: chex.Array
-  deter_state: chex.Array
+  joint_recurrent_state: chex.Array
+  joint_repr_state: chex.Array
+  joint_deter_state: chex.Array
   decoded_obs: chex.Array
   reward_dist_logit: chex.Array
   done_logit: chex.Array
   legal_logit: chex.Array
-  dynamics_state: chex.Array
+  joint_dynamics_state: chex.Array
 
 
 @chex.dataclass(frozen=True)
@@ -65,7 +65,7 @@ class TimeStep():
 @chex.dataclass(frozen=True)
 class BufferConfig:
   buffer_size: int
-  on_policy: bool
+  sampling_epsilon: float #Uniform policy mixture in the sampling policy
   replay_ratio: int = -1 #How many steps should be collected from the replay buffer per
                           # online collected env step
 
@@ -310,7 +310,7 @@ def get_percentiles_with_mask(data: chex.Array, mask:chex.Array, percentile: che
   num_valid = jnp.sum(broadcasted_mask)
   #Rescale the percentile. To accurately
   # reflect we do not care about the invalid data at the end
-  scale_factor = num_valid / data.size
+  scale_factor = (num_valid - 1) / (data.size - 1)
   new_percentile = scale_factor * percentile
   return jnp.percentile(masked_data, new_percentile)
 
@@ -333,37 +333,30 @@ def get_value_from_bins(dist_logits: chex.Array, bin_range: int):
   v = symexp(v)
   return v
 
-def wm_timestep_to_timestep(wm_timestep: TimeStep, wm_prediction_step: PredictionStepWithLegal, is_iig: bool) ->ActorCriticTimeStep:
-    #Do not forget that the Dreamer timestep rewards and terminal
+def wm_timestep_to_timestep(wm_timestep: TimeStep, wm_prediction_step: PredictionStepWithLegal, use_iset: bool) ->ActorCriticTimeStep:
+    #Do not forget that the world model timestep rewards and terminal
     # are w.r.t. the current state. We want
     # reward for playing an action in the current state, not for getting to it
     # so, they are shifted by 1 forward in time
-    # compared to our desired RNaD timesteps.
+    # compared to our desired actor-critic timesteps.
     # We also do not want the last step, since that is always a terminal state
     legal = wm_timestep.legal[:-1]
     action = wm_timestep.action[:-1]
     policy = wm_timestep.policy[:-1]
     reward = wm_timestep.reward[1:]
     valid = jnp.logical_and(~wm_timestep.terminal[:-1], wm_timestep.valid[:-1])
-
-    num_players = action.shape[-2]
     
     #if we shouldnt use infosets we replace obs
     # with the predicted model states
-    if is_iig:
+    if use_iset:
       obs = wm_timestep.obs[:-1]
     else:
       #These are sampled from the encoder produced stochastic states
       # once again, do not take the last one since it will be terminal
-      deters = wm_prediction_step.deter_state[:-1]
+      deters = wm_prediction_step.joint_deter_state[:-1]
       flat_deters = jnp.reshape(deters, (*deters.shape[:-2], -1))  
-      players_oh = jnp.eye(num_players)
-      players_oh = jnp.reshape(players_oh, (1, ) * (flat_deters.ndim - 1) + players_oh.shape)
-      model_states = jnp.concatenate([wm_prediction_step.recurrent_state[:-1], flat_deters], axis=-1)
-      stacked_model_states = jnp.stack([model_states, model_states], axis=-2)
-      players_oh = jnp.broadcast_to(players_oh, (*stacked_model_states.shape[:-1], players_oh.shape[-1]))
-      player_model_states = jnp.concatenate([stacked_model_states, players_oh], axis=-1)
-      obs = player_model_states
+      model_states = jnp.concatenate([wm_prediction_step.joint_recurrent_state[:-1], flat_deters], axis=-1)
+      obs = model_states
     ac_timestep = ActorCriticTimeStep(obs = obs,
                                       legal=legal,
                                       action=action,

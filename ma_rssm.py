@@ -7,7 +7,7 @@ from networks import *
 from optimizer import make_opt
 from distributions import sample_categorical
 from train_utils import *
-from games.jax_game import JaxGame, InformationType
+from games.jax_game import JaxGame
 
 f32 = jnp.float32
 u8 = jnp.uint8
@@ -29,22 +29,25 @@ class MARSSM(nnx.Module):
     # for each player is sufficient for our iset. Later, when scaling up, we will have a model 
     # for each player and it will also work this way even for IIGs. 
     # But for now, for IIGs we just use the actual in game isets.
-    self.is_iig = game.information_type() == InformationType.IIG or wm_config.use_original_iset
+    self.use_real_iset = wm_config.use_original_iset
     self.num_actions = game.num_distinct_actions()
     self.num_players = game.num_players()
     rec_state_size = wm_config.sequential_network_details[0]
+    #If recurrent state size is unset, set it to the minimal
+    # size possible to capture all the context. Eg.
+    # the size of the infoset tensor
     if rec_state_size < 1:
-      rec_state_size = self.num_players * game.information_state_tensor_shape()
+      rec_state_size = game.information_state_tensor_shape()
     self.rec_state_size = rec_state_size
     enc_tokens = wm_config.encoder_network_details[0]
     deter_size = wm_config.encoded_categories * wm_config.encoded_classes
     self.encoded_classes = wm_config.encoded_classes
     self.encoded_categories = wm_config.encoded_categories
-    if self.is_iig:
+    if self.use_real_iset:
       self.infoset_size = game.information_state_tensor_shape()
       print(f"Using original game isets of shape {self.infoset_size}")
     else:
-      self.infoset_size = (self.num_players + rec_state_size + deter_size)
+      self.infoset_size = (rec_state_size + deter_size)
       print(f"Using the model states of shape {self.infoset_size}")
     #self.wm_config = wm_config
     #self.ac_config = ac_config
@@ -60,19 +63,20 @@ class MARSSM(nnx.Module):
     self.seq = SequenceModel(wm_config.encoded_classes,
                               wm_config.encoded_categories,
                               self.num_actions,
-                              self.num_players,
                               wm_config.sequential_network_details[1],
                               wm_config.sequential_network_details[2],
                               rec_state_size,
                               rngs)
-    self.rew = RewardPredictor(wm_config.bin_range, 
+    self.rew = RewardPredictor(self.num_players,
+                               wm_config.bin_range, 
                                wm_config.encoded_classes, 
                                wm_config.encoded_categories,
                                rec_state_size,
                                wm_config.reward_predictor_network_details[0],
                                wm_config.reward_predictor_network_details[1],
                                rngs=rngs)
-    self.term = DonePredictor(wm_config.encoded_classes,
+    self.term = DonePredictor(self.num_players,
+                              wm_config.encoded_classes,
                               wm_config.encoded_categories,
                               rec_state_size,
                               wm_config.done_predictor_network_details[0],
@@ -93,25 +97,14 @@ class MARSSM(nnx.Module):
                                  wm_config.dynamics_network_details[0],
                                  wm_config.dynamics_network_details[1],
                                  rngs=rngs)
-    #Watch out! The encoder always receives the
-    # joint infoset from the game, never the model infosets.
-    # Decoder also decodes the original infosets
-    self.enc = JointIsetEncoder(game.information_state_tensor_shape(), 
-                                self.num_players,
+    self.enc = Encoder(game.information_state_tensor_shape(),
                                 enc_tokens,
                                 wm_config.encoder_network_details[1],
                                 wm_config.encoder_network_details[2],
                                 rngs
                                 )
     
-    self.p1_dec = Decoder(rec_state_size, 
-                          game.information_state_tensor_shape(),
-                          wm_config.encoded_classes,
-                          wm_config.encoded_categories,
-                          wm_config.decoder_network_details[0],
-                          wm_config.decoder_network_details[1],
-                          rngs)
-    self.p2_dec = Decoder(rec_state_size, 
+    self.dec = Decoder(rec_state_size, 
                           game.information_state_tensor_shape(),
                           wm_config.encoded_classes,
                           wm_config.encoded_categories,
@@ -126,7 +119,7 @@ class MARSSM(nnx.Module):
                                       wm_config.observer_network_details[1],
                                       rngs)
     
-    self.network_names = ['dyn', 'enc', 'leg', 'observer', 'p1_dec', 'p2_dec', 'rew', 'seq', 'term']
+    self.network_names = ['dyn', 'seq' 'p1_enc','leg', 'observer', 'dec', 'rew', 'term']
 
     if self.use_rnad:
       self.actor_critic = RNaDNetwork(self.infoset_size,
@@ -183,7 +176,7 @@ class MARSSM(nnx.Module):
     are ordered from innermost to the outermost vmap.
     The in axes and out axes are NOT expected to contain
     the leading None for the network itself, that is added by this function.
-    The network itself is then bound through partial, so it should not be put into
+    The network itself is then bound to the vmapped function, so it should not be put into
     calls of the resulting function."""
     assert len(in_axes) == len(out_axes), f"In axes and out axes need to contain specification for the same amount of vmaps! Got {len(in_axes)} for in axes and {len(out_axes)} for out axes."
     graphdef, state = nnx.split(net)
@@ -207,20 +200,20 @@ class MARSSM(nnx.Module):
   
 
   @nnx.jit
-  def get_predictor(self, recurrent_state: chex.Array, deterministic_state:chex.Array):
+  def get_predictor(self, joint_recurrent_state: chex.Array, joint_deterministic_state:chex.Array):
     """Calls the predictor and legal actions networks and 
     passes the reward, done logits and legal action logits through
     appropriate transformations to return the actual values"""
-    return self.get_predictor_no_jit(recurrent_state, deterministic_state,
+    return self.get_predictor_no_jit(joint_recurrent_state, joint_deterministic_state,
                                     )
   
-  def get_predictor_no_jit(self, recurrent_state: chex.Array, deterministic_state:chex.Array):
+  def get_predictor_no_jit(self, joint_recurrent_state: chex.Array, joint_deterministic_state:chex.Array):
     """Calls the predictor and legal actions networks and 
     passes the reward, done logits and legal action logits through
     appropriate transformations to return the actual values"""
     #[2* bin_range + 1], [1]
-    reward_bin_logits, done_logit = MARSSM.call_net(self.rew, recurrent_state, deterministic_state), MARSSM.call_net(self.term, recurrent_state, deterministic_state)
-    legal_logit = MARSSM.call_net(self.leg, recurrent_state, deterministic_state)
+    reward_bin_logits, done_logit = MARSSM.call_net(self.rew, joint_recurrent_state, joint_deterministic_state), MARSSM.call_net(self.term, joint_recurrent_state, joint_deterministic_state)
+    legal_logit = MARSSM.call_net(self.leg, joint_recurrent_state, joint_deterministic_state)
     reward = get_value_from_bins(reward_bin_logits, self.wm_bin_range)
     done_prob = nnx.sigmoid(done_logit)
     terminal = done_prob >= self.terminal_threshold
@@ -229,20 +222,39 @@ class MARSSM(nnx.Module):
     return reward[0], terminal[0], legal_actions
   
   @partial(nnx.jit, static_argnums=(3))
-  def get_decoder(self, recurrent_state: chex.Array, deterministic_state: chex.Array, player:int):
+  def get_decoder(self, recurrent_state: chex.Array, deterministic_state: chex.Array, use_symexp=True):
     """Calls the decoder network and 
     applies the appropriate transformation to its output.
     Outputs either predicted real observation in single agent setting, or 
     predicted iset for a single player in a multi agent setting. """
-    dec = self.p1_dec if player == 0 else self.p2_dec
-    decoder_output_untransformed = MARSSM.call_net(dec, recurrent_state, deterministic_state)
-    decoder_output = symexp(decoder_output_untransformed)
-    #decoder_output = decoder_output_untransformed
+    decoder_output = MARSSM.call_net(self.dec, recurrent_state, deterministic_state)
+    if use_symexp:
+      decoder_output = symexp(decoder_output)
+    return decoder_output
+  
+  @partial(nnx.jit, static_argnums=(3))
+  def get_decoder_all(self, joint_recurrent_state: chex.Array, joint_deterministic_state:chex.Array, use_symexp=True):
+    return self.get_decoder_all_no_jit(joint_recurrent_state, joint_deterministic_state, use_symexp)
+
+  
+  def get_decoder_all_no_jit(self, joint_recurrent_state: chex.Array, joint_deterministic_state:chex.Array, use_symexp=True):
+    vectorized_decoder = nnx.vmap(MARSSM.call_net, in_axes=(None, 0, 0), out_axes=0)
+    decoder_output = vectorized_decoder(self.dec, joint_recurrent_state, joint_deterministic_state)
+    if use_symexp:
+      decoder_output = symexp(decoder_output)
     return decoder_output
   
   @nnx.jit
   def get_dynamics(self, recurrent_state:chex.Array):
     return MARSSM.call_net(self.dyn, recurrent_state)
+  
+  @nnx.jit
+  def get_dyn_all(self, joint_recurrent_state: chex.Array):
+    return self.get_dyn_all_no_jit(joint_recurrent_state)
+  
+  def get_dyn_all_no_jit(self, joint_recurrent_state: chex.Array):
+    vectorized_dynamics = nnx.vmap(MARSSM.call_net, in_axes=(None, 0), out_axes=0)
+    return vectorized_dynamics(self.dyn, joint_recurrent_state)
   
   @nnx.jit
   def get_encoder(self, recurrent_state:chex.Array, obs: chex.Array):
@@ -254,22 +266,45 @@ class MARSSM(nnx.Module):
     return MARSSM.call_net(self.observer, recurrent_state, tokens)
   
   @nnx.jit
-  def get_next_recurrent(self, recurrent_state:chex.Array, deterministic_state:chex.Array, joint_action:chex.Array):
-    return MARSSM.call_net(self.seq, recurrent_state, deterministic_state, joint_action)
+  def get_enc_all(self, joint_recurrent_state: chex.Array, joint_obs: chex.Array):
+    return self.get_dyn_all_no_jit(joint_recurrent_state, joint_obs)
   
-  def get_next_recurrent_no_jit(self, recurrent_state:chex.Array, deterministic_state:chex.Array, joint_action:chex.Array):
-    return MARSSM.call_net(self.seq, recurrent_state, deterministic_state, joint_action)
+  def get_enc_all_no_jit(self, joint_recurrent_state: chex.Array, joint_obs: chex.Array):
+    vectorized_enc = nnx.vmap(MARSSM.call_net, in_axes=(None, 0), out_axes=0)
+    vectorized_observer = nnx.vmap(MARSSM.call_net, in_axes=(None, 0, 0), out_axes=0)
+    tokens = vectorized_enc(self.enc, joint_obs)
+    return vectorized_observer(self.observer, joint_recurrent_state, tokens)
+
+  
+  @nnx.jit
+  def get_next_recurrent(self, recurrent_state:chex.Array, deterministic_state:chex.Array, action:chex.Array):
+    return MARSSM.call_net(self.seq, recurrent_state, deterministic_state, action)
+  
+  def get_next_recurrent_no_jit(self, recurrent_state:chex.Array, deterministic_state:chex.Array, action:chex.Array):
+    return MARSSM.call_net(self.seq, recurrent_state, deterministic_state, action)
+  
+  @nnx.jit
+  def get_next_recurrent_all(self, joint_recurrent_state:chex.Array, joint_deterministic_state:chex.Array, joint_action:chex.Array):
+    return self.get_next_recurrent_all_no_jit(joint_recurrent_state, joint_deterministic_state, joint_action)
+  
+  def get_next_recurrent_all_no_jit(self, joint_recurrent_state:chex.Array, joint_deterministic_state:chex.Array, joint_action:chex.Array):
+    vectorized_seq = nnx.vmap(MARSSM.call_net, in_axes=(None, 0, 0, 0), out_axes=0)
+    return vectorized_seq(self.seq, joint_recurrent_state, joint_deterministic_state, joint_action)
+  
   
   @partial(nnx.jit, static_argnums=(1))
   def get_init_recurrent(self, n_starts:int = 0):
     dummy_rec = jnp.zeros(self.rec_state_size)
     dummy_deter = jnp.zeros((self.encoded_classes, self.encoded_categories))
-    dummy_joint_action = jnp.zeros((self.num_players, self.num_actions))
-    init_rec =  MARSSM.call_net(self.seq, dummy_rec, dummy_deter, dummy_joint_action)
+    dummy_action = jnp.zeros((self.num_actions))
+    #Both players will start from the zero context
+    # we can just tile this instead of calling the network twice
+    init_rec =  MARSSM.call_net(self.seq, dummy_rec, dummy_deter, dummy_action)
+    init_rec = jnp.tile(init_rec[None, ...], (self.num_players, 1))
     #Just handle 0, or negative value as a special case for only one
     # start, without the leading batch dimension
     if n_starts > 0:
-      init_rec = jnp.tile(init_rec[None, ...], (n_starts, 1))
+      init_rec = jnp.tile(init_rec[None, ...], (n_starts, 1, 1))
     return init_rec
 
   
@@ -303,23 +338,15 @@ class MARSSM(nnx.Module):
 
 
   @nnx.jit
-  def get_obs(self, recurrent_state: chex.Array, deter_state:chex.Array):
-    return self.get_obs_no_jit(recurrent_state, deter_state)
+  def get_iset(self, joint_recurrent_state: chex.Array, joint_deter_state:chex.Array):
+    return self.get_iset_no_jit(joint_recurrent_state, joint_deter_state)
   
-  def get_obs_no_jit(self, recurrent_state: chex.Array, deter_state:chex.Array):
-    if self.is_iig:
-      #TODO: For now, iset decoder is used to create trajectories 
-      # trained on the "original" isets. This might be changed later
-      p1_iset = MARSSM.call_net(self.p1_dec, recurrent_state, deter_state)
-      p2_iset = MARSSM.call_net(self.p2_dec, recurrent_state, deter_state)
-      obs = jnp.stack([p1_iset, p2_iset], axis=0)
-      return obs
-    flat_deter = deter_state.reshape((*deter_state.shape[:-2], -1))
-    players_oh = jnp.eye(self.num_players)
-    players_oh = jnp.reshape(players_oh, (1, ) * (flat_deter.ndim - 1) + players_oh.shape)
-    model_state = jnp.concatenate([recurrent_state, flat_deter], axis=-1)
-    player_model_state = jnp.concatenate([jnp.stack([model_state, model_state], axis=-2), players_oh], axis=-1)
-    return player_model_state
+  def get_iset_no_jit(self, joint_recurrent_state: chex.Array, joint_deter_state:chex.Array):
+    if self.use_real_iset:
+      return self.get_decoder_all_no_jit(joint_recurrent_state, joint_deter_state)
+    flat_deter = joint_deter_state.reshape((*joint_deter_state.shape[:-2], -1))
+    model_state = jnp.concatenate([joint_recurrent_state, flat_deter], axis=-1)
+    return model_state
 
 
   
@@ -332,14 +359,14 @@ class MARSSM(nnx.Module):
     
     @chex.dataclass(frozen=True)
     class SampleTrajectoryCarry:
-      recurrent_state:chex.Array
-      deter_state: chex.Array
+      joint_recurrent_state:chex.Array
+      joint_deter_state: chex.Array
       legal_actions: chex.Array
       terminal: bool
       
     init_carry = SampleTrajectoryCarry(
-      recurrent_state = starting_point.recurrent_state,
-      deter_state = starting_point.deter_state, #TODO: Take the one that the world model sampled, or sample anew?
+      joint_recurrent_state = starting_point.joint_recurrent_state,
+      joint_deter_state = starting_point.joint_deter_state, #TODO: Take the one that the world model sampled, or sample anew?
       legal_actions = (nnx.sigmoid(starting_point.legal_logit) >= self.legal_threshold).astype(u8), 
       terminal = (nnx.sigmoid(starting_point.done_logit) >= self.terminal_threshold)[0]
     )
@@ -357,7 +384,7 @@ class MARSSM(nnx.Module):
     @nnx.scan(in_axes = (nnx.Carry, 0, None), out_axes=(nnx.Carry, 0))
     def _imagine_trajectory(carry: SampleTrajectoryCarry, key, ma_rssm: MARSSM) -> tuple[SampleTrajectoryCarry, chex.Array]:
       
-      obs = ma_rssm.get_obs_no_jit(carry.recurrent_state, carry.deter_state)
+      obs = ma_rssm.get_iset_no_jit(carry.joint_recurrent_state, carry.joint_deter_state)
 
       #get policy 
       pi = ma_rssm.get_policy_both_no_jit(obs, carry.legal_actions)
@@ -370,12 +397,13 @@ class MARSSM(nnx.Module):
       action_sample_key, state_sample_key = jax.random.split(key)
       action_sample_keys = jax.random.split(action_sample_key, self.num_players)
       action, action_oh = vectorized_sample_action(action_sample_keys, pi)
+
       
       
-      next_hidden = ma_rssm.seq(carry.recurrent_state, carry.deter_state, action_oh)
-      next_stoch = ma_rssm.dyn(next_hidden)
-      next_deter = sample_categorical(next_stoch, state_sample_key, sample_threshold=ma_rssm.state_sample_threshold)
-      next_reward, next_terminal, next_legal = ma_rssm.get_predictor(next_hidden, next_deter)
+      next_joint_recurrent = ma_rssm.get_next_recurrent_all_no_jit(carry.joint_recurrent_state, carry.joint_deter_state, action_oh)
+      next_joint_stoch = ma_rssm.get_dyn_all_no_jit(next_joint_recurrent)
+      next_joint_deter = sample_categorical(next_joint_stoch, state_sample_key, sample_threshold=ma_rssm.state_sample_threshold)
+      next_reward, next_terminal, next_legal = ma_rssm.get_predictor(next_joint_recurrent, next_joint_deter)
       next_terminal = jnp.logical_or(carry.terminal, next_terminal)
       # The world model can produce all actions to be invalid
       # even when one of the players does not act, he always has one legal
@@ -391,8 +419,8 @@ class MARSSM(nnx.Module):
         valid = valid
       )
       new_carry = SampleTrajectoryCarry(
-        recurrent_state = next_hidden,
-        deter_state = next_deter,
+        joint_recurrent_state = next_joint_recurrent,
+        joint_deter_state = next_joint_deter,
         legal_actions=jnp.where(next_terminal, ac_default.legal, next_legal),
         terminal = jnp.logical_or(next_terminal, jnp.logical_not(valid)),
       )

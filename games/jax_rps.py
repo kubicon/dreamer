@@ -8,6 +8,7 @@ from games.jax_game import JaxGame, GameState, InformationType
 
 u8 = jnp.uint8
 i8 = jnp.int8
+f32 = jnp.float32
 
 @chex.dataclass(frozen=True)
 class RPSSTate(GameState):
@@ -91,7 +92,7 @@ class JaxRPS(JaxGame):
     new_game_state = RPSSTate(terminal = terminal,
                               p1_points = p1_points)
     
-    return new_game_state, terminal, p1_points, legal_actions
+    return new_game_state, terminal, p1_points.astype(f32), legal_actions
 
 @chex.dataclass(frozen=True)
 class JaxStochasticRPSState(GameState):
@@ -202,7 +203,7 @@ class JaxStochasticRPS(JaxGame):
                                                terminal = jnp.array(False, dtype=bool),
                                                game_type = game_type,
                                                is_chance = jnp.array(False, dtype=bool))
-    return after_chance_state, jnp.array(False, dtype=bool), jnp.array(0), legals 
+    return after_chance_state, jnp.array(False, dtype=bool), jnp.array(0, dtype=f32), legals 
 
   @functools.partial(jax.jit, static_argnums=(0,))
   def apply_action_no_chance(self, game_state:JaxStochasticRPSState, actions):
@@ -227,7 +228,7 @@ class JaxStochasticRPS(JaxGame):
                               game_type = game_state.game_type,
                               is_chance = jnp.array(False, dtype=bool))
     
-    return new_game_state, terminal, p1_points, legals
+    return new_game_state, terminal, p1_points.astype(f32), legals
   
   def apply_action(self, game_state: JaxStochasticRPSState, actions):
     return jax.lax.cond(game_state.is_chance, self.apply_action_chance, self.apply_action_no_chance, game_state, actions)

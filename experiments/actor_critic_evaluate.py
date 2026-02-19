@@ -84,40 +84,41 @@ def get_metrics_from_dir(model_dir, args):
 
         model_path = os.path.join(model_dir, filename)
         
-        try:
-            if first:
-                model = load_model(model_path)
-                assert isinstance(model, DreamerMA), f"Expected DreamerMA, got {model.__class__}"
-                
-                # Initialize Game
-                if not model.optimizer.model.is_iig:
-                    game = DreamerModelGame(model)
-                else:
-                    game = model.game
-                first = False
+        #try:
+        if first:
+            model = load_model(model_path)
+            assert isinstance(model, DreamerMA), f"Expected DreamerMA, got {model.__class__}"
+            
+            # Initialize Game
+            if not model.optimizer.model.use_real_iset:
+                game = DreamerModelGame(model)
             else:
-                temp_model = load_model(model_path)
-                nnx.update(model.optimizer, nnx.state(temp_model.optimizer))
-                model.actor_critic.learner_steps = temp_model.actor_critic.learner_steps
-                model.learner_steps = temp_model.learner_steps
-                
-                if not model.optimizer.model.is_iig:
-                    game = DreamerModelGame(model)
+                game = model.game
+            first = False
+        else:
+            temp_model = load_model(model_path)
+            nnx.update(model.optimizer, nnx.state(temp_model.optimizer))
+            model.actor_critic.learner_steps = temp_model.actor_critic.learner_steps
+            model.learner_steps = temp_model.learner_steps
+            
+            if not model.optimizer.model.use_real_iset:
+                game = DreamerModelGame(model)
 
-            # Calculate Metric
-            if args.metric == "nash_conv":
-                metric = nash_conv(model, game)
-            else:
-                model_map_and_behaviorals = extract_model_policy(model, game)
-                metric, _ = policy_expected_value(game, model_map_and_behaviorals)
+        # Calculate Metric
+        if args.metric == "nash_conv":
+            metric = nash_conv(model, game)
+        else:
+            model_map_and_behaviorals = extract_model_policy(model, game)
+            metric, _ = policy_expected_value(game, model_map_and_behaviorals)
+        
+        metric = args.scale_factor * metric
+        metrics.append(metric)
+        steps.append(step)
             
-            metric = args.scale_factor * metric
-            metrics.append(metric)
-            steps.append(step)
-            
-        except Exception as e:
-            print(f"Failed to process {filename}: {e}")
-            continue
+        # except Exception as e:
+        #     breakpoint()
+        #     print(f"Failed to process {filename}: {e}")
+        #     continue
 
     print(f"Evaluation for {model_dir} took {time.time() - start_time:.2f} seconds.")
     
@@ -172,8 +173,8 @@ def plot_comparison(args):
     for algo_name, dir_paths in algos.items():
         for s, d in zip(seeds,dir_paths):
             steps, metrics, game, new_game_str, new_smoothing_window = metrics_wrapper(d, args)
-            max_steps = max(max_steps, len(steps))
             if steps is not None and len(steps) > 0:
+                max_steps = max(max_steps, len(steps))
                 results[algo_name][s] = (steps, metrics)
                 #Check if all experiments used the same game
                 if not game_str:
@@ -239,14 +240,24 @@ def plot_comparison(args):
         
         # Calculate Statistics
         mean = np.mean(matrix, axis=0)
-        std = np.std(matrix, axis=0)
         
         # Plot Mean Line
         color = colors.get(algo_name, 'black')
-        ax.plot(ref_steps, mean, label=algo_name, color=color, linewidth=2)
-        
-        # Plot Shaded Region (Mean +/- StdDev)
-        ax.fill_between(ref_steps, mean - std, mean + std, color=color, alpha=0.2)
+        for i in range(matrix.shape[0]):
+            ax.plot(ref_steps, matrix[i], 
+                    color=color, 
+                    alpha=0.3,       # Make it faint
+                    linestyle='--',   # Dotted/Dashed line
+                    linewidth=1)      # Thinner line
+
+        # 2. Plot Mean Line
+        # We plot this LAST so it appears on top of the individual seeds.
+        # We add the label here so it appears in the legend once.
+        ax.plot(ref_steps, mean, 
+                label=algo_name, 
+                color=color, 
+                linestyle='-', 
+                linewidth=2.5)    # Thicker, solid line
 
     # Plot Uniform Baseline (Dashed Line)
     if args.metric == "nash_conv" and game:

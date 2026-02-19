@@ -56,6 +56,8 @@ class RNaDNetwork(nnx.Module):
   def __init__(self, iset_features, action_features, bin_range, hidden_features, num_layers, rngs:nnx.Rngs):
     self.init_layer = LinNormRelu(iset_features, hidden_features, rngs)
     self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
+    #Initialize to uniform policy logits
+    #self.policy_head = nnx.Linear(hidden_features, action_features, rngs=rngs, kernel_init=nnx.initializers.zeros_init(), bias_init=nnx.initializers.zeros_init())
     self.policy_head = nnx.Linear(hidden_features, action_features, rngs=rngs)
     #Initialize the value output layer to all zeros, as per
     # https://arxiv.org/pdf/2301.04104 page 6
@@ -81,8 +83,10 @@ class ActorNetwork(nnx.Module):
   def __init__(self, input_features, action_features, hidden_features, num_layers, rngs:nnx.Rngs):
     self.init_layer = LinNormRelu(input_features, hidden_features, rngs)
     self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
+    #Initialize to uniform policy logits
+    #self.policy_head = nnx.Linear(hidden_features, action_features, rngs=rngs, kernel_init=nnx.initializers.zeros_init(), bias_init=nnx.initializers.zeros_init())
     self.policy_head = nnx.Linear(hidden_features, action_features, rngs=rngs)
-  
+    
   def __call__(self, input, legal):
     x = self.init_layer(input)
     x = self.core_mlp(x)
@@ -123,12 +127,11 @@ class SequenceModel(nnx.Module):
     It is implemented in the same way as in the DreamerV3 reference implementation,
     except that instead of using their custom BlockLinear uses just standard MLP.
   '''
-  def __init__(self, encoded_classes, encoded_categories, action_features, num_players,
+  def __init__(self, encoded_classes, encoded_categories, action_features,
                linear_hidden_features: int, linear_hidden_layers: int,
                recurrent_state_size, rngs: nnx.Rngs):
-    self.multi_player = int(num_players > 1)
     self.hidden_init = LinNormRelu(recurrent_state_size, linear_hidden_features, rngs=rngs)
-    self.action_init = LinNormRelu((action_features * num_players), linear_hidden_features, rngs=rngs)
+    self.action_init = LinNormRelu(action_features, linear_hidden_features, rngs=rngs)
     self.deter_init = LinNormRelu(encoded_classes * encoded_categories, linear_hidden_features, rngs=rngs)
     # Concatenation of the actual recurrent state, with
     # the embeddings of the recurrent state, action and stochastic state
@@ -141,12 +144,9 @@ class SequenceModel(nnx.Module):
     """Ensure that action is already one hot encoded. Deter state is the 
     already sampled state out of stochastic state"""
     flat_deter = jnp.reshape(deter_state, (*deter_state.shape[:-2], -1))
-    #If we have multi-player, we need to flatten the last two dimensions
-    stop_at = -1 -self.multi_player
-    flat_action = jnp.reshape(action, (*action.shape[:stop_at], -1))
     x0 = self.hidden_init(recurrent_state)
     x1 = self.deter_init(flat_deter)
-    x2 = self.action_init(flat_action)
+    x2 = self.action_init(action)
     x = jnp.concatenate([recurrent_state, x0, x1, x2], axis=-1)
     x = self.core_mlp(x)
     gates = self.gate_head(x)
@@ -160,30 +160,15 @@ class SequenceModel(nnx.Module):
     new_recurrent_state = update * cand + (1 - update) * recurrent_state
     
     return new_recurrent_state
-  
 
 class Encoder(nnx.Module):
-  """Recieve an observation from the environment,
+  """Recieve an infoset from the environment,
   return a latent feature vector that, along with the current
-  recurrent state, will be used to produce current deterministic state"""
-  def __init__(self, observation_features, tokens_features, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
-    self.init_layer = LinNormRelu(observation_features, hidden_features, rngs)
-    self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
-    self.last_layer = nnx.Linear(hidden_features, tokens_features, rngs=rngs)
-    
-  def __call__(self, observation: chex.Array):
-    x = self.init_layer(observation)
-    x = self.core_mlp(x)
-    tokens = self.last_layer(x)
-    return tokens
+  recurrent state, will be used to produce current stochastic state logits."""
+  def __init__(self, iset_features, tokens_features, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
 
-class JointIsetEncoder(nnx.Module):
-  """Recieve a joint infoset from the environment,
-  return a latent feature vector that, along with the current
-  recurrent state, will be used to produce current deterministic state."""
-  def __init__(self, iset_features, num_players, tokens_features, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
-
-    self.init_layer = LinNormRelu(iset_features * num_players, hidden_features, rngs)
+    self.tokens_features = tokens_features
+    self.init_layer = LinNormRelu(iset_features, hidden_features, rngs)
     self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
     self.last_layer = nnx.Linear(hidden_features, tokens_features, rngs=rngs)
     
@@ -217,10 +202,11 @@ class ObservedPredictor(nnx.Module):
 class Decoder(nnx.Module):
   """Receive a current deterministic latent state (eg. a encoded_categories-hot vector)
   and recurrent state
-  and return a reconstruction of current observation."""
+  and return a reconstruction of current observation/infoset for the particular player."""
   def __init__(self, recurrent_state_size, observation_features, encoded_classes, encoded_categories, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
     self.encoded_classes = encoded_classes
     self.encoded_categories = encoded_categories
+    self.observation_features = observation_features
     self.init_layer = LinNormRelu(recurrent_state_size + encoded_classes * encoded_categories, hidden_features, rngs)
     self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
     self.last_layer = nnx.Linear(hidden_features, observation_features, rngs=rngs)
@@ -256,8 +242,8 @@ class Predictor(nnx.Module):
   Pass the done logits through sigmoid and compare against a threshold if you want
   to obtain an actual done flag. The reward are logits of a distribution over the exponentially
   spaced bins like symexp([-bin_range, bin_range])."""
-  def __init__(self, recurrent_state_size, encoded_classes, encoded_categories, bin_range, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
-    self.init_layer = LinNormRelu(recurrent_state_size + encoded_classes * encoded_categories, hidden_features, rngs)
+  def __init__(self, num_players, recurrent_state_size, encoded_classes, encoded_categories, bin_range, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
+    self.init_layer = LinNormRelu(num_players * (recurrent_state_size + encoded_classes * encoded_categories), hidden_features, rngs)
     self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
     #Initialize the reward output layer to all zeros, as per
     # https://arxiv.org/pdf/2301.04104 page 6
@@ -265,7 +251,12 @@ class Predictor(nnx.Module):
     self.done_layer = nnx.Linear(hidden_features, 1, rngs=rngs)
     
   def __call__(self, recurrent_state: chex.Array, encoded_state: chex.Array):
-    x = jnp.concatenate([recurrent_state, encoded_state.reshape(*encoded_state.shape[:-2], -1)], axis=-1)
+    #Flatten the dimensions
+    # Flatten [Pl, K, C]
+    encoded_state = encoded_state.reshape(*encoded_state.shape[:-3], -1)
+    # Flatten [Pl, H]
+    recurrent_state = recurrent_state.reshape(*recurrent_state.shape[:-2], -1)                                
+    x = jnp.concatenate([recurrent_state, encoded_state], axis=-1)
     x = self.init_layer(x)
     x = self.core_mlp(x)
     reward = self.reward_layer(x)
@@ -273,9 +264,14 @@ class Predictor(nnx.Module):
     return reward, done
 
 class LegalActionsNetwork(nnx.Module):
-  """Receive a current hidden state and deterministic state and return the legal action logits."""
+  """Receive a current hidden state and deterministic state and return the legal action logits.
+  CRUCIAL! Centralized legals are only sound where knowledge of legal actions does not reveal any information. 
+  In our domains it holds, but in Fog of War games, 
+  where we can try to move into an unobservable fog, knowing that the action is illegal would reveal information. 
+  Just something to keep in mind."""
   def __init__(self, num_players, action_dimension, encoded_classes, encoded_categories, recurrent_state_size, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
-    self.init_layer = LinNormRelu(recurrent_state_size + (encoded_classes * encoded_categories), hidden_features, rngs)
+    self.num_players = num_players
+    self.init_layer = LinNormRelu(num_players * (recurrent_state_size + (encoded_classes * encoded_categories)), hidden_features, rngs)
     self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
     self.legal_layer = nnx.Linear(hidden_features, num_players * action_dimension, rngs=rngs)
 
@@ -283,7 +279,12 @@ class LegalActionsNetwork(nnx.Module):
     self.action_dimension = action_dimension
 
   def __call__(self, recurrent_state: chex.Array, encoded_state: chex.Array):
-    x = jnp.concatenate([recurrent_state, encoded_state.reshape(*encoded_state.shape[:-2], -1)], axis=-1)
+    #Flatten the dimensions
+    # Flatten [Pl, K, C]
+    encoded_state = encoded_state.reshape(*encoded_state.shape[:-3], -1)
+    # Flatten [Pl, H]
+    recurrent_state = recurrent_state.reshape(*recurrent_state.shape[:-2], -1)                                
+    x = jnp.concatenate([recurrent_state, encoded_state], axis=-1)
     x = self.init_layer(x)
     x = self.core_mlp(x)
     legal = self.legal_layer(x)
@@ -294,14 +295,19 @@ class RewardPredictor(nnx.Module):
   return the logits of a the reward categorical
   distribution over exponentially spaced bins such as
   symexp([-bin_range, bin_range])"""
-  def __init__(self, bin_range, encoded_classes, encoded_categories, recurrent_state_size, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
-    self.init_layer = LinNormRelu(recurrent_state_size + (encoded_categories * encoded_classes), hidden_features, rngs)
+  def __init__(self, num_players, bin_range, encoded_classes, encoded_categories, recurrent_state_size, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
+    self.init_layer = LinNormRelu(num_players * (recurrent_state_size + (encoded_categories * encoded_classes)), hidden_features, rngs)
     self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
     self.reward_layer = nnx.Linear(hidden_features, (2 * bin_range) + 1, rngs=rngs,kernel_init= nnx.initializers.zeros_init(), bias_init=nnx.initializers.zeros_init())
 
 
   def __call__(self, recurrent_state: chex.Array, encoded_state: chex.Array):
-    x = jnp.concatenate([recurrent_state, encoded_state.reshape(*encoded_state.shape[:-2], -1)], axis=-1)
+    #Flatten the dimensions
+    # Flatten [Pl, K, C]
+    encoded_state = encoded_state.reshape(*encoded_state.shape[:-3], -1)
+    # Flatten [Pl, H]
+    recurrent_state = recurrent_state.reshape(*recurrent_state.shape[:-2], -1)                                
+    x = jnp.concatenate([recurrent_state, encoded_state], axis=-1)
     x = self.init_layer(x)
     x = self.core_mlp(x)
     reward_dist_logits = self.reward_layer(x)
@@ -310,41 +316,21 @@ class RewardPredictor(nnx.Module):
 class DonePredictor(nnx.Module):
   """Receive a current hidden state and deterministic state and
   return the logits of the done/terminal flag"""
-  def __init__(self,encoded_classes, encoded_categories, recurrent_state_size, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
-    self.init_layer = LinNormRelu(recurrent_state_size + (encoded_classes * encoded_categories), hidden_features, rngs)
+  def __init__(self, num_players, encoded_classes, encoded_categories, recurrent_state_size, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
+    self.init_layer = LinNormRelu(num_players * (recurrent_state_size + (encoded_classes * encoded_categories)), hidden_features, rngs)
     self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
     self.done_layer = nnx.Linear(hidden_features, 1, rngs=rngs)
 
 
   def __call__(self, recurrent_state: chex.Array, encoded_state: chex.Array):
-    x = jnp.concatenate([recurrent_state, encoded_state.reshape(*encoded_state.shape[:-2], -1)], axis=-1)
+    #Flatten the dimensions
+    # Flatten [Pl, K, C]
+    encoded_state = encoded_state.reshape(*encoded_state.shape[:-3], -1)
+    # Flatten [Pl, H]
+    recurrent_state = recurrent_state.reshape(*recurrent_state.shape[:-2], -1)                                
+    x = jnp.concatenate([recurrent_state, encoded_state], axis=-1)
     x = self.init_layer(x)
     x = self.core_mlp(x)
     done_logit = self.done_layer(x)
     return done_logit
-  
-
-# class PredictorWithLegal(nnx.Module):
-#   """Has reward and done heads the same way as standard predictor,
-#   but also predicts legal action mask for both players."""
-#   def __init__(self, num_players, action_dimension, recurrent_state_size, encoded_classes, encoded_categories, bin_range, hidden_features, num_layers, rngs: nnx.Rngs) -> None:
-#     self.init_layer = LinNormRelu(recurrent_state_size + encoded_classes * encoded_categories, hidden_features, rngs)
-#     self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
-#     self.reward_layer = nnx.Linear(hidden_features, (2 * bin_range) + 1, rngs=rngs)
-#     #self.reward_layer = nnx.Linear(hidden_features, 1, rngs=rngs)
-#     self.done_layer = nnx.Linear(hidden_features, 1, rngs=rngs)
-#     self.legal_layer = nnx.Linear(hidden_features, num_players * action_dimension, rngs=rngs)
-
-#     self.num_players = num_players
-#     self.action_dimension = action_dimension
-    
-#   def __call__(self, recurrent_state: chex.Array, encoded_state: chex.Array):
-#     x = jnp.concatenate([recurrent_state, encoded_state.reshape(*encoded_state.shape[:-2], -1)], axis=-1)
-#     x = self.init_layer(x)
-#     x = self.core_mlp(x)
-#     reward = self.reward_layer(x)
-#     done = self.done_layer(x)
-#     flat_legal = self.legal_layer(x)
-#     legal = jnp.reshape(flat_legal, (*flat_legal.shape[:-1], self.num_players, self.action_dimension))
-#     return reward, done, legal
 

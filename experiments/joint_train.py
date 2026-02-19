@@ -49,7 +49,7 @@ def train(args, game: JaxGame):
     )
     
   buffer_config = BufferConfig(buffer_size = args.buffer_size,
-                                on_policy = args.on_policy,
+                                sampling_epsilon = args.real_sampling_epsilon,
                                 replay_ratio = args.replay_ratio,
                                 smoothing_window = args.smoothing_window,
                                 log_returns = args.log_returns,
@@ -75,7 +75,7 @@ def train(args, game: JaxGame):
 
         eta=args.eta,
         vtrace_eta = args.vtrace_eta,
-        sampling_epsilon=args.sampling_epsilon,
+        sampling_epsilon=args.img_sampling_epsilon,
         
         upper_percentile = args.upper_percentile,
         lower_percentile = args.lower_percentile,
@@ -125,7 +125,7 @@ def train(args, game: JaxGame):
       range_ema_coeff = args.range_ema_coeff,
       num_last = args.num_last,
 
-      sampling_epsilon=args.sampling_epsilon,
+      sampling_epsilon=args.img_sampling_epsilon,
       #Dreamer extraction parameters
       state_sample_threshold=args.state_sample_threshold,
       terminal_threshold = args.terminal_threshold,

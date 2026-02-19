@@ -46,8 +46,8 @@ def track(func):
 #################################################################
 
 
-def get_next_outcomes(model: DreamerMA, stoch_state: chex.Array,
-                      recurrent_state: chex.Array, obs: chex.Array| np.ndarray,
+def get_next_outcomes(model: DreamerMA, joint_stoch_state: chex.Array,
+                      joint_recurrent_state: chex.Array, obs: chex.Array| np.ndarray,
                       threshold: float = 0.05) ->list:
   """Takes all possible stochastic state outcomes and then
   clusters them to the corresponding next outcome, based on 
@@ -57,30 +57,35 @@ def get_next_outcomes(model: DreamerMA, stoch_state: chex.Array,
 
   obs = np.asarray(obs)
   num_next_obs = obs.shape[0]
-  num_categoricals = stoch_state.shape[0]
+  num_players ,num_classes, num_categories = joint_stoch_state.shape
   next_deters = [[] for _ in range(num_next_obs)]
   probs = [[] for _ in range(num_next_obs)]
+  total_classes = num_players * num_classes
 
-  num_classes = stoch_state.shape[0]
+  #Flatten the stoch state over the players
+  # to straightforwadly perform the stoch_state
+  stoch_state = joint_stoch_state.reshape((-1, num_categories))
   deter_states = (stoch_state >= threshold).astype(int)
   class_indices, category_indices = np.nonzero(deter_states)
   per_class_valids = []
-  for i in range(num_classes):
+  for i in range(total_classes):
     single_class_indices = category_indices[class_indices == i]
     per_class_valids.append(single_class_indices)
 
   combinations = cartesian_product(*per_class_valids)
   for comb in combinations:
-    prob = stoch_state[np.arange(num_categoricals), comb]
+    prob = np.prod(stoch_state[np.arange(total_classes), comb])
     sampled_deter = jax.nn.one_hot(comb, stoch_state.shape[-1])
-    next_closest_idx = get_closest_next_ma(model, recurrent_state, sampled_deter, obs)
-    next_deters[next_closest_idx].append(sampled_deter)
+    #Reshape back to be per player deter state
+    joint_deter = sampled_deter.reshape((num_players, num_classes, num_categories))
+    next_closest_idx = get_closest_next_ma(model, joint_recurrent_state, joint_deter, obs)
+    next_deters[next_closest_idx].append(joint_deter)
     probs[next_closest_idx].append(prob)
     
   return next_deters, probs
 
 
-def get_closest_next_ma(model: DreamerMA, recurrent_state, next_deter, next_isets: np.ndarray):
+def get_closest_next_ma(model: DreamerMA, joint_recurrent_state, next_joint_deter, next_isets: np.ndarray):
   """Find the index of the closest next state
   this deterministic state corresponds to. With
   respect to distance between real isets of both players
@@ -88,9 +93,7 @@ def get_closest_next_ma(model: DreamerMA, recurrent_state, next_deter, next_iset
   if next_isets.ndim == 2 or next_isets.shape[0] == 1:
     return 0
   ma_rssm = model.optimizer.model
-  p1_decoded_iset = ma_rssm.get_decoder(recurrent_state, next_deter, player=0)
-  p2_decoded_iset = ma_rssm.get_decoder(recurrent_state, next_deter, player=1)
-  decoded_obs = np.stack([p1_decoded_iset, p2_decoded_iset], axis=0)
+  decoded_obs = ma_rssm.get_decoder_all(joint_recurrent_state, next_joint_deter)
   next_dists = np.sum((decoded_obs[None, ...] - next_isets) ** 2, axis=(-1, -2))
   next_closest  = np.argmin(next_dists)
   return next_closest

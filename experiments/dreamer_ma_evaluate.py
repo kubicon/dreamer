@@ -8,7 +8,6 @@ import jax.numpy as jnp
 import time
 import matplotlib.pyplot as plt
 
-from games.jax_game import InformationType
 from dreamer_ma import DreamerMA
 from train_utils import load_model
 
@@ -30,9 +29,9 @@ class WalkCarry:
   legals: chex.Array
   game_state: GameState
   obs: chex.Array
-  recurrent_state: chex.Array
-  stoch_state:chex.Array
-  deter_state: chex.Array
+  joint_recurrent_state: chex.Array
+  joint_stoch_state:chex.Array
+  joint_deter_state: chex.Array
   reward: chex.Array
   terminal: chex.Array
   after_chance: chex.Array
@@ -44,14 +43,14 @@ def check_state_one_outcome(model: DreamerMA, carry:WalkCarry, eps:float, verbos
   mistake_probs = np.zeros(5)
   differences = np.zeros(5)
   ma_rssm = model.optimizer.model
-  p1_decoded_iset = ma_rssm.get_decoder(carry.recurrent_state, carry.deter_state, player=0)
-  p2_decoded_iset = ma_rssm.get_decoder(carry.recurrent_state, carry.deter_state, player=1)
-  pred_reward, pred_terminal, pred_legal = ma_rssm.get_predictor(carry.recurrent_state, carry.deter_state)
+  isets = ma_rssm.get_decoder_all(carry.joint_recurrent_state, carry.joint_deter_state)
+  p1_decoded_iset, p2_decoded_iset = isets[0], isets[1]
+  pred_reward, pred_terminal, pred_legal = ma_rssm.get_predictor(carry.joint_recurrent_state, carry.joint_deter_state)
   p1_iset_max_difference = jnp.max(jnp.abs(carry.obs[0] - p1_decoded_iset))
   p2_iset_max_difference = jnp.max(jnp.abs(carry.obs[1] - p2_decoded_iset))
   reward_difference = jnp.abs(carry.reward - pred_reward)
   legal_diference = not carry.terminal and jnp.any(pred_legal != carry.legals)
-  det_prob = jnp.prod(carry.stoch_state[carry.deter_state.astype(jnp.bool)])
+  det_prob = jnp.prod(carry.joint_stoch_state[carry.joint_deter_state.astype(jnp.bool)])
 
   differences[0] = p1_iset_max_difference
   if p1_iset_max_difference >= eps:
@@ -116,7 +115,7 @@ def model_walk_test(model:DreamerMA,
   def get_both_obs(state: GameState):
     _, p1_iset, p2_iset, _ = model.game.get_info(state)
     return jnp.stack([p1_iset, p2_iset], axis=0)
-  is_iig = model.game.information_type() == InformationType.IIG
+  use_real_iset = model.use_real_iset
 
   get_obs_fn = get_both_obs 
   #get_closest_deter_fn = get_closest_deter_ma if is_ma else get_closest_deter
@@ -131,6 +130,7 @@ def model_walk_test(model:DreamerMA,
     stoch_unnormalized = stoch_unfiltered * (stoch_unfiltered >= probability_threshold)
     stoch = stoch_unnormalized / np.sum(stoch_unnormalized, axis=-1, keepdims=True)
     return stoch
+
 
   def _tree_walk(carry: WalkCarry, depth=0, reach_probability:float = 1.0, action_outcome_history = "",
                  subtree_parent: Node = None, outcome:int = -1, outcome_prob: float = 0, create_model_node:bool = False):
@@ -157,7 +157,7 @@ def model_walk_test(model:DreamerMA,
     mistake_probs  = mistake_probs + (state_mistake_probs * reach_probability)
     if carry.terminal:
       return
-    policy_obs = carry.obs if is_iig else ma_rssm.get_obs(carry.recurrent_state, carry.deter_state)
+    policy_obs = carry.obs if use_real_iset else ma_rssm.get_iset(carry.joint_recurrent_state, carry.joint_deter_state)
     pi = np.asarray(ma_rssm.get_policy_both(policy_obs, carry.legals))
     if verbose:
       print(f"Checking state {carry.game_state}")
@@ -167,9 +167,7 @@ def model_walk_test(model:DreamerMA,
     actions = np.tile(np.arange(pi.shape[-1]), (num_players,1)).reshape(pi.shape)
     valid_actions = [actions[i][pi_mask[i]] for i in range(num_players)]
     joint_actions = cartesian_product(*valid_actions)
-    #print(f"Joint actions: {joint_actions}")
     for a in joint_actions:
-      #print(f"Applying action {a}")
       action_prob = np.prod(pi[np.arange(a.shape[0]), a])
       action_parent = parent
       if visualise_tree:
@@ -180,8 +178,13 @@ def model_walk_test(model:DreamerMA,
         action_parent = action_node
       next_state, next_terminal, next_reward, next_legals = model.game.apply_action(carry.game_state, a)
       ai_oh = jax.nn.one_hot(a, carry.legals.shape[-1])
-      next_recurrent = ma_rssm.get_next_recurrent(carry.recurrent_state, carry.deter_state, ai_oh)
-      next_stoch_state = get_stoch_from_prediction(ma_rssm.get_dynamics(next_recurrent))
+      next_joint_recurrent = ma_rssm.get_next_recurrent_all(carry.joint_recurrent_state, carry.joint_deter_state, ai_oh)
+      #jax.debug.breakpoint()
+      dyn = ma_rssm.get_dyn_all_no_jit(next_joint_recurrent)
+      #jax.debug.breakpoint()
+      dyn = ma_rssm.get_dyn_all(next_joint_recurrent)
+      #jax.debug.breakpoint()
+      next_joint_stoch_state = get_stoch_from_prediction(dyn)
             
       is_chance = model.game.is_chance(next_state)
       chance_outcomes = model.game.depth_chance_valid_outcomes(depth + 1)
@@ -199,7 +202,7 @@ def model_walk_test(model:DreamerMA,
         next_legals = np.asarray(next_legals)[None, ...]
       next_obs = vectorized_get_obs(next_states)
       next_obs = np.asarray(next_obs)
-      next_deters, next_probs= get_next_outcomes(model, next_stoch_state, next_recurrent, next_obs, probability_eps)
+      next_joint_deters, next_probs= get_next_outcomes(model, next_joint_stoch_state, next_joint_recurrent, next_obs, probability_eps)
       #print(f"Next deters: {next_deters}")
       for i in range(next_terminals.shape[0]):
         outcome_parent = action_parent
@@ -207,7 +210,7 @@ def model_walk_test(model:DreamerMA,
         next_reward = next_rewards[i]
         next_legal = next_legals[i]
         next_state = jax.tree.map(lambda x: x[i], next_states)
-        single_outcome_deters = next_deters[i]
+        single_outcome_deters = next_joint_deters[i]
         single_outcome_probs = next_probs[i]
         outcome_prob = np.sum(single_outcome_probs)
         if next_terminals.shape[0] > 1  and visualise_tree:
@@ -216,17 +219,17 @@ def model_walk_test(model:DreamerMA,
                           parent=outcome_parent,
                           data = {"prob": outcome_prob, "type": PAST_CHANCE})
           outcome_parent = outcome_node
-        for j, deter in enumerate(single_outcome_deters):
+        for j, joint_deter in enumerate(single_outcome_deters):
           new_carry = WalkCarry(legals= next_legal,
                                 obs = next_obs[i],
                                 game_state = next_state,
-                                recurrent_state= next_recurrent,
-                                stoch_state=next_stoch_state,
-                                deter_state=deter,
+                                joint_recurrent_state= next_joint_recurrent,
+                                joint_stoch_state=next_joint_stoch_state,
+                                joint_deter_state=joint_deter,
                                 reward=next_reward,
                                 terminal=next_terminal,
                                 after_chance=is_chance)
-          prob = jnp.prod(next_stoch_state[deter.astype(jnp.bool)])  
+          prob = jnp.prod(next_joint_stoch_state[joint_deter.astype(jnp.bool)])  
           _tree_walk(new_carry, depth = depth+ 1 + int(is_chance), subtree_parent = outcome_parent,
                      action_outcome_history= action_outcome_history + f"a{a}o{i}",
                      reach_probability= reach_probability * prob,
@@ -234,7 +237,7 @@ def model_walk_test(model:DreamerMA,
                      create_model_node=True)
   
   init_state, init_legals = model.game.initialize_structures()
-  init_recurrent = ma_rssm.get_init_recurrent()
+  init_joint_recurrent = ma_rssm.get_init_recurrent()
   init_chance =  model.game.is_chance(init_state)
   if init_chance:
     chance_outcomes = model.game.depth_chance_valid_outcomes(0)
@@ -260,9 +263,9 @@ def model_walk_test(model:DreamerMA,
       #print(f"Init obs for outcome {i}, is {init_obs}")
       # if verbose:
       #   print(f"Checking state {next_state}")
-      init_stoch_state = get_stoch_from_prediction(ma_rssm.get_encoder(init_recurrent, init_obs[0]))
-      init_deters, init_probs = get_next_outcomes(model, init_stoch_state, init_recurrent, init_obs, probability_eps)
-      init_deters = init_deters[0]
+      init_joint_stoch_state = get_stoch_from_prediction(ma_rssm.get_encoder(init_joint_recurrent, init_obs[0]))
+      init_joint_deters, init_probs = get_next_outcomes(model, init_joint_stoch_state, init_joint_recurrent, init_obs, probability_eps)
+      init_joint_deters = init_joint_deters[0]
       init_probs = init_probs[0]
       outcome_path = f"o{i}"
       outcome_prob = np.sum(init_probs)
@@ -272,13 +275,13 @@ def model_walk_test(model:DreamerMA,
                          data = {"prob": outcome_prob, "type": PAST_CHANCE})
         outcome_parent = init_chance
       #num_init_deters = len(init_deters)
-      for j, deter in enumerate(init_deters):
+      for j, joint_deter in enumerate(init_joint_deters):
         init_carry = WalkCarry(legals= next_legal,
                               obs = init_obs[0],
                               game_state = next_state,
-                              recurrent_state= init_recurrent,
-                              stoch_state=init_stoch_state,
-                              deter_state=deter,
+                              joint_recurrent_state= init_joint_recurrent,
+                              joint_stoch_state=init_joint_stoch_state,
+                              joint_deter_state=joint_deter,
                               reward=next_reward,
                               terminal=next_terminal,
                               after_chance=init_chance)
@@ -293,25 +296,26 @@ def model_walk_test(model:DreamerMA,
     if visualise_tree:
       render_tree(model_tree_root, model)
     return avg_mistake_probs
-  init_obs = get_obs_fn(init_state)[None, ...]
-  init_stoch_state = get_stoch_from_prediction(ma_rssm.get_encoder(init_recurrent, init_obs[0]))
+  init_obs = get_obs_fn(init_state)
+  init_joint_stoch_state = get_stoch_from_prediction(ma_rssm.get_enc_all_no_jit(init_joint_recurrent, init_obs))
+  #The simplest 
   if verbose:
     print(f"Checking state {init_state}")
-  init_deters, init_probs = get_next_outcomes(model, init_stoch_state, init_recurrent, init_obs, probability_eps)
-  init_deters = init_deters[0]
+  init_joint_deters, init_probs = get_next_outcomes(model, init_joint_stoch_state, init_joint_recurrent, init_obs, probability_eps)
+  init_joint_deters = init_joint_deters[0]
   init_probs = init_probs[0]
   #num_init_deters = len(init_deters)
-  for i, deter in enumerate(init_deters):
+  for i, joint_deter in enumerate(init_joint_deters):
     init_carry = WalkCarry(legals= init_legals,
-                              obs=init_obs[0],
+                              obs=init_obs,
                               game_state = init_state,
-                              recurrent_state= init_recurrent,
-                              stoch_state=init_stoch_state,
-                              deter_state=deter,
+                              joint_recurrent_state= init_joint_recurrent,
+                              joint_stoch_state=init_joint_stoch_state,
+                              joint_deter_state=joint_deter,
                               reward=jnp.array(0),
                               terminal=jnp.array(False),
                               after_chance=jnp.array(False))
-    prob = jnp.prod(init_stoch_state[deter.astype(jnp.bool)])
+    prob = jnp.prod(init_joint_stoch_state[joint_deter.astype(jnp.bool)])
     _tree_walk(init_carry, subtree_parent = model_tree_root,  
                     reach_probability=prob,
                      outcome = i, outcome_prob=init_probs[i],
@@ -389,7 +393,7 @@ def main():
   #print(profiler.output_text(color=True, unicode=True))
   if len(all_mistake_probs) == 0:
     raise FileNotFoundError(f"Model directory {model_dir} and restore step {args.restore_step}. Did not find any file. Make sure"
-                            "the directory contains a file in a form of step_restore_step.pkl, "
+                            " the directory contains a file in a form of step_restore_step.pkl, "
                             "where restore_step is either the specified number, or arbitrary integer if -1.")
   all_mistake_probs = np.asarray(all_mistake_probs)
   steps = np.asarray(steps)

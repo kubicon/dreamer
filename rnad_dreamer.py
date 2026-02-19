@@ -290,7 +290,7 @@ class RNaDDreamer():
     self.num_players = game.num_players()
 
     ma_rssm = self.optimizer.model
-    self.is_iig = ma_rssm.is_iig
+    self.use_real_iset = ma_rssm.use_real_iset
     self.input_size = ma_rssm.infoset_size
 
     num_last = self.config.num_last
@@ -485,7 +485,7 @@ class RNaDDreamer():
     vectorized_net_apply = nnx.vmap(nnx.vmap(per_player_net_apply, in_axes=(None, 0, 0), out_axes=(0)), in_axes=(None, 0, 0), out_axes=(0))
     
     
-    rnad_timestep = wm_timestep_to_timestep(wm_timestep, wm_prediction_step, self.is_iig)   
+    rnad_timestep = wm_timestep_to_timestep(wm_timestep, wm_prediction_step, self.use_real_iset)   
     #TODO: This will be called again in the real loss. Cannot get rid of the
     # redundant call somehow?
     timestep_pi, _, _, _ = vectorized_net_apply(optimizer.model.actor_critic, rnad_timestep.obs, rnad_timestep.legal)

@@ -17,53 +17,40 @@ from typing import Any
 
 
 def reinforce_loss_with_range(
+  pi: chex.Array,
   log_pi: chex.Array,
   returns: chex.Array,
   values: chex.Array, 
   action_oh: chex.Array,
-  return_range: chex.Array
+  return_range: chex.Array,
+  entropy_eta: float = 0.2 # Regularization factor for the additional entropy regularization
 ):
-  """Compute the Reinforce estimator score. Multiply this by -1 to get loss.
-  Expects the estimates to already have the entropy bonus accounted for"""
+  """Compute the Reinforce estimator score, with
+  entropy exploration bonus. Crucial! Reinforce really
+  needs to add it explicitly here, adding it in TD-estimation
+  will not promote exploration, but rather
+  even further artifically upweight values. Multiply this by -1 to get loss."""
   advantage = returns - values
   advantage = jax.lax.stop_gradient(advantage / jnp.maximum(1, return_range))
-  #advantage = jax.lax.stop_gradient(advantage)
+
+  entropy_bonus = -entropy_eta * jnp.sum(log_pi * pi, axis=-1, keepdims=True)
 
   reinforce_loss_value = jnp.sum(action_oh * log_pi * advantage, axis=-1, keepdims=True)
-  #jax.debug.breakpoint()
 
-  return reinforce_loss_value
+  return reinforce_loss_value + entropy_bonus
 
 def td_estimate(
   v: chex.Array,
   valid: chex.Array,
-  sampling_policy: chex.Array,
-  log_sampling_policy: chex.Array,
   reward: chex.Array,
   lambda_: float = 1.0,
-  entropy_eta: float = 0.2, # Regularization factor for the additional entropy regularization
   gamma: float = 1.0 # Discount factor
 ):
   """Computes the TD-lambda estimate of the return. Only for the on-policy case.
   (This implementation is esentially V-trace in RNaD without the importance sampling).
   This is designed to work over the entire trajectory without bootstrapping"""
   
-  
-  
-  #[Trajectory, Batch, Player]
-  regularization_entropy = -entropy_eta * jnp.sum(sampling_policy * log_sampling_policy, axis=-1)
-  
-  #[Trajectory, Batch]
-  # The MinMaxEnt objective
-  both_player_entropy = (regularization_entropy[..., 0]  - regularization_entropy[..., 1])
-
-  #[Trajectory, Batch]
-  entropy_reward = reward + both_player_entropy
-  #[Trajectory, Batch, Player, 1]
-  entropy_reward = jnp.expand_dims(jnp.stack((entropy_reward, -entropy_reward), axis=-1), -1)
-  
-  
-  
+  reward = jnp.expand_dims(jnp.stack((reward, -reward), axis=-1), -1)
   
   @chex.dataclass(frozen=True)
   class TDCarry: 
@@ -98,7 +85,7 @@ def td_estimate(
   _, v_target = jax.lax.scan(
     f=_td_estimate,
     init=init_carry,
-    xs=(v, entropy_reward, valid),
+    xs=(v, reward, valid),
     reverse=True
   )
   return v_target
@@ -118,7 +105,7 @@ class DreamerActorCritic():
     self.actions = game.num_distinct_actions()
     self.num_players = game.num_players()
     ma_rssm = self.optimizer.model
-    self.is_iig = ma_rssm.is_iig
+    self.use_real_iset = ma_rssm.use_real_iset
     self.input_size = ma_rssm.infoset_size
 
     num_last = self.config.num_last
@@ -189,14 +176,17 @@ class DreamerActorCritic():
       v_target_dist_logits = vectorized_critic_apply(target_network, timestep.obs)
        
       v_target = get_value_from_bins(v_target_dist_logits, self.config.bin_range)
-      v = get_value_from_bins(v_dist_logits, self.config.bin_range)
       
       expanded_valid = jnp.expand_dims(timestep.valid, (-1, -2))
+      #Watch out! Do not call legal_log_policy here, as
+      # it assumes a logit and not a softmaxed policy, so we get
+      # different results
+      mask = (timestep.policy <= 1e-8)
+      log_timestep_pi = jnp.log(timestep.policy + mask)
+      log_timestep_pi = (1 - mask) * log_timestep_pi
 
-      log_timestep_pi = legal_log_policy(timestep.policy, timestep.legal)
-      
-      v_train_target= td_estimate(v_target, expanded_valid, timestep.policy, log_timestep_pi, timestep.reward,
-                                        self.config.td_lambda, self.config.eta, self.config.gamma)
+      v_train_target= td_estimate(v_target, expanded_valid, timestep.reward,
+                                        self.config.td_lambda, self.config.gamma)
       
       percentiles = get_percentiles_with_mask(v_train_target, expanded_valid, jnp.array([self.config.upper_percentile, self.config.lower_percentile]))
       current_range = (percentiles[0] - percentiles[1])
@@ -206,8 +196,7 @@ class DreamerActorCritic():
       v_loss_value = get_loss_mean_with_mask(v_loss, expanded_valid)
       if compute_actor_loss:    
         
-        loss_reinforce = reinforce_loss_with_range(log_pi, v_train_target, jnp.zeros_like(v_train_target), timestep.action, new_range)
-        
+        loss_reinforce = reinforce_loss_with_range(pi, log_pi, v_train_target, v_target, timestep.action, new_range, self.config.eta)
         # The multiplication by -1 is critical here, otherwise we would
         # be minimizing the neurd term, but we want to maximize it.
         reinforce_loss_value = -get_loss_mean_with_mask(loss_reinforce, expanded_valid)
@@ -241,7 +230,7 @@ class DreamerActorCritic():
         return beta_real * loss_val, (new_range, metrics)
       
     
-    ac_timestep = wm_timestep_to_timestep(wm_timestep, wm_prediction_step, self.is_iig)  
+    ac_timestep = wm_timestep_to_timestep(wm_timestep, wm_prediction_step, self.use_real_iset)  
     starting_points = jax.tree.map(lambda x: x[-self.num_last: ].reshape((-1, *x.shape[2:])), wm_prediction_step)
     #starting_points = jax.tree.map(lambda x: x[0].reshape((-1, *x.shape[2:])), wm_prediction_step)
     #jax.tree.map(lambda x: print(x.shape), starting_points)
@@ -254,7 +243,7 @@ class DreamerActorCritic():
       self.config.beta_imagination)
     
     img_loss, (new_range, img_metrics) = img_return
-    optimizer.update(igrad)           
+    optimizer.update(igrad)       
     r_return, rgrad = nnx.value_and_grad(real_loss, argnums=(0), has_aux=True)(
       optimizer.model,
       target_optimizer.model,

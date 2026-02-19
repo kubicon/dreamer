@@ -44,11 +44,6 @@ class DreamerMA():
     self.jax_rngs = jax.random.key(self.init_seed)
 
     self.buffer= ReplayBuffer(self.game, self.buffer_config, self.wm_config, self.init_seed, self.ac_config.state_sample_threshold)
-    
-    recurrent_state_size = self.wm_config.sequential_network_details[0]
-    if recurrent_state_size < 1:
-      recurrent_state_size = self.game.num_players() * self.game.information_state_tensor_shape()
-    self.recurrent_state_size = recurrent_state_size
 
     rngs = nnx.Rngs(jax.random.key(self.init_seed))
     self.optimizer= create_dreamer_optimizer(self.game, self.wm_config, self.ac_config, self.opt_config, rngs)
@@ -62,14 +57,15 @@ class DreamerMA():
 
     self.action_dimension = self.game.num_distinct_actions()
     self.infoset_size = ma_rssm.infoset_size
+    self.use_real_iset = ma_rssm.use_real_iset
     assert self.game.num_players() > 1, f"This implementation of Dreamer assumes a game with at least 2 players not {self.game.num_players()}"
-    use_rnad = ma_rssm.use_rnad
-    self.use_rnad = use_rnad
+    self.recurrent_state_size = ma_rssm.rec_state_size
+    self.use_rnad = ma_rssm.use_rnad
     #Vanilla SGD coupled with the gradients
     # we compute manually in actor critic will handle
     # the EMA updates for us.
     target_tx = optax.sgd(self.ac_config.target_network_update)
-    if use_rnad:
+    if self.use_rnad:
       target_optimizer = nnx.Optimizer(model= RNaDNetwork(self.infoset_size,
                                                           self.action_dimension,
                                                           self.ac_config.bin_range,
@@ -117,37 +113,37 @@ class DreamerMA():
       l_pred, l_dyn, l_rep = 0, 0, 0
       #[Trajectory, Batch, ...]
       @nnx.scan(in_axes=(nnx.Carry, 0, None), out_axes=(nnx.Carry, 0))
-      def _predict_over_timestep(recurrent_state, xs, model: MARSSM):
+      def _predict_over_timestep(joint_recurrent_state, xs, model: MARSSM):
         
         action, obs, cur_key = xs
-        tokens = model.enc(obs)
-        stochastic_state = model.observer(recurrent_state, tokens)
-        stochastic_state = add_uniform_mix(stochastic_state, self.wm_config.uniform_mix)
-        deterministic_state = sample_categorical(stochastic_state, cur_key)
-        prior_stochastic_state = model.dyn(recurrent_state)
-        prior_stochastic_state = add_uniform_mix(prior_stochastic_state, self.wm_config.uniform_mix)
-        reward, done = model.rew(recurrent_state, deterministic_state), model.term(recurrent_state, deterministic_state)
-        legal = model.leg(recurrent_state, deterministic_state)
-        decoded_p1_obs = model.p1_dec(recurrent_state, deterministic_state)
-        decoded_p2_obs = model.p2_dec(recurrent_state, deterministic_state)
-        decoded_obs = jnp.stack([decoded_p1_obs, decoded_p2_obs], axis=0)
-        new_hidden = model.seq(recurrent_state, deterministic_state, action)
+        joint_stochastic_state = model.get_enc_all_no_jit(joint_recurrent_state, obs)
+        joint_stochastic_state = add_uniform_mix(joint_stochastic_state, self.wm_config.uniform_mix)
+        joint_deterministic_state = sample_categorical(joint_stochastic_state, cur_key)
+        joint_prior_stochastic_state = model.get_dyn_all_no_jit(joint_recurrent_state)
+        joint_prior_stochastic_state = add_uniform_mix(joint_prior_stochastic_state, self.wm_config.uniform_mix)
+        reward, done = model.rew(joint_recurrent_state, joint_deterministic_state), model.term(joint_recurrent_state, joint_deterministic_state)
+        legal = model.leg(joint_recurrent_state, joint_deterministic_state)
+        #Dont use symexp here during training. Otherwise we would be training
+        # the symexp outputs to match the symlog inputs.
+        decoded_obs = model.get_decoder_all_no_jit(joint_recurrent_state, joint_deterministic_state, use_symexp=False)
+        new_hidden = model.get_next_recurrent_all_no_jit(joint_recurrent_state, joint_deterministic_state, action)
         preds = PredictionStepWithLegal(
-                                recurrent_state = recurrent_state,
-                                repr_state = stochastic_state,
-                                deter_state = deterministic_state,
+                                joint_recurrent_state = joint_recurrent_state,
+                                joint_repr_state = joint_stochastic_state,
+                                joint_deter_state = joint_deterministic_state,
                                 decoded_obs = decoded_obs,
                                 reward_dist_logit = reward,
                                 done_logit = done,
                                 legal_logit = legal,
-                                dynamics_state = prior_stochastic_state) 
+                                joint_dynamics_state = joint_prior_stochastic_state) 
         
         return new_hidden, preds
       
       xs = (timestep.action, timestep.obs, sample_keys)
-      init_hidden = ma_rssm.get_init_recurrent(self.wm_config.batch_size)
+      init_recurrent = ma_rssm.get_init_recurrent(self.wm_config.batch_size)
+      #print(f"Init recur shape {init_recurrent.shape}")
       vectorized_predict = nnx.vmap(_predict_over_timestep, in_axes=(0, 1, None), out_axes=(0, 1))
-      _, predictions = vectorized_predict(init_hidden, xs, ma_rssm) 
+      _, predictions = vectorized_predict(init_recurrent, xs, ma_rssm) 
 
       #[Trajectory, Batch, num_players, obs_size]
       reconstruction_loss = -get_normal_log_prob(predictions.decoded_obs, timestep.obs, use_symlog=True)
@@ -161,7 +157,7 @@ class DreamerMA():
       #[Trajectory, Batch, players, action_dim]
       legal_loss = optax.sigmoid_binary_cross_entropy(predictions.legal_logit, timestep.legal)
       #Legal actions should not be trained in terminal states, as there are no legal actions there
-      leg = get_loss_mean_with_mask(legal_loss, ~timestep.terminal[..., None, None])
+      leg = get_loss_mean_with_mask(legal_loss, timestep.valid[..., None, None] & ~timestep.terminal[..., None, None])
       l_pred += leg
       #[Trajectory, Batch, 2* bin_range + 1]
       bins = jnp.arange((2 * self.wm_config.bin_range) + 1) - self.wm_config.bin_range
@@ -174,18 +170,17 @@ class DreamerMA():
       #Using free bits to clip dynamics and representation losses
       # thus disabling their gradient when they are below free_bits_clip_threshold
       #[Trajectory, Batch, encoded_categories, encoded_classes]
-      posterior = nnx.softmax(predictions.repr_state, axis=-1)
-      prior = nnx.softmax(predictions.dynamics_state, axis=-1)
+      posterior = nnx.softmax(predictions.joint_repr_state, axis=-1)
+      prior = nnx.softmax(predictions.joint_dynamics_state, axis=-1)
       #[Trajectory, Batch]
       dynamics_loss = kl_divergence(jax.lax.stop_gradient(posterior), prior)
-      l_dyn += jnp.maximum(self.wm_config.free_bits_clip_threshold, get_loss_mean_with_mask(dynamics_loss, timestep.valid))
+      l_dyn += jnp.maximum(self.wm_config.free_bits_clip_threshold, get_loss_mean_with_mask(dynamics_loss, timestep.valid[..., None]))
       #[Trajectory, Batch]
       repr_loss = kl_divergence(posterior, jax.lax.stop_gradient(prior))
-      l_rep += jnp.maximum(self.wm_config.free_bits_clip_threshold, get_loss_mean_with_mask(repr_loss, timestep.valid))
+      l_rep += jnp.maximum(self.wm_config.free_bits_clip_threshold, get_loss_mean_with_mask(repr_loss, timestep.valid[..., None]))
       
       losses = (dec, con, leg, rew, l_dyn, l_rep)
       mults = (*(self.wm_config.beta_prediction, ) * 4, self.wm_config.beta_dynamics, self.wm_config.beta_representation)
-
       wm_keys = self.metrics.keys()
       metrics = {k: v * m for k, v, m in zip(wm_keys, losses, mults)}
       

@@ -11,7 +11,6 @@ def add_actor_critic_arguments(parser: ArgumentParser) -> ArgumentParser:
   parser.add_argument(f"--beta_real", type=float, default=0.3, help="Coefficient for loss on real environment trajectories")
 
   parser.add_argument(f"--eta", type=float, default=3e-4, help="Coefficient for entropy exploration bonus for Reinforce")
-  parser.add_argument("--sampling_epsilon", type=float, default=0.0, help="Defines mix of uniform policy to the network learned policy during trajectory sampling.")
   parser.add_argument(f"--gamma", type=float, default=0.997, help="Discount factor for TD-learning")
   parser.add_argument(f"--td_lambda", type=float, default=0.95, help="Lambda parameter for TD-learning")
 
@@ -50,7 +49,7 @@ def add_wm_arguments(parser: ArgumentParser) ->ArgumentParser:
   #Replay buffer parameters
   parser.add_argument("--buffer_size", type=int, default=32, help="Size of the replay buffer.")
   parser.add_argument("--replay_ratio", type=int, default=-1, help="The replay ratio, which defines the amount of online steps per minibatch. Respectively, the ratio is replay_ratio / (batch_size * trajectory_len). If -1, only online trajectories are sampled")
-  parser.add_argument("--on_policy", action="store_true", help="A flag whether to use the actor policy for trajectory sampling. If not, uniform policy is used instead.")
+  parser.add_argument("--trajectory_sample_eps", action="store_true", help="A flag whether to use the actor policy for trajectory sampling. If not, uniform policy is used instead.")
   parser.add_argument("--return_log_frequency", type=int, default=10, help="How often to log trajectory return in the replay buffer in terms of collected minibatches")
   parser.add_argument("--smoothing_window", type=int, default=32, help="How many returns to use for the running average window")
   parser.add_argument("--log_returns", action="store_true", help="A flag whether to log the smoothed returns. They will be stored in the same directory as the model.")
@@ -94,8 +93,6 @@ def add_rnad_arguments(parser: ArgumentParser) ->ArgumentParser:
   parser.add_argument("--target_network_update", type=float, default=1e-3, help="EMA coefficient for the target network update.")
   parser.add_argument("--eta", type=float, default=0.2, help="Strenght of the regularization in RNaD. Used for the reward transformation and the KL regularization for V-trace.")
   parser.add_argument("--vtrace_eta", type=float, default=0.2, help="Strenght of the additional KL regularization term in V-trace.")
-  parser.add_argument("--sampling_epsilon", type=float, default=0.0, help="Defines mix of uniform policy to the network learned policy during trajectory sampling.")
-  parser.add_argument("--use_real_environment", action="store_true", help="Whether to use the real game for trajectory sampling. If not, trajectories are sampled from the Dreamer model. Just for debugging.")
   parser.add_argument("--ac_bin_range", type=int, default=20, help="Number of the exponentially spaced bins for the value categorical distribution prediction")
 
   #Dreamer model extraction parameters
@@ -175,6 +172,11 @@ def prepare_experiment_parser():
 
   parser.add_argument("--train_real_policy", action="store_true", help="A flag whether to learn actor on real trajectories also")
   parser.add_argument("--report_gradnorms", action="store_true", help="Whether to report gradient norms as well as losses.")
+
+  #Uniform mixtures in sampling policies.
+  
+  parser.add_argument("--img_sampling_epsilon", type=float, default=0.0, help="Defines mix of uniform policy to the network learned policy during imagination trajectory sampling.")
+  parser.add_argument("--real_sampling_epsilon", type=float, default=0.0, help="Defines mix of uniform policy to the network learned policy during real trajectory sampling.")
 
   parser = add_optimizer_arguments(parser)
 
