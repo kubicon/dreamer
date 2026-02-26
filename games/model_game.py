@@ -19,10 +19,12 @@ class ModelGameState:
   reward: chex.Array
   terminal: chex.Array
   turn: int
-  joint_recurrent_state: chex.Array # The recurrent network state for all players
-  joint_deter_state: chex.Array # The one-hot sampled outcome of the categoricals for all players
-  joint_stoch_state: chex.Array # The softmaxed distribution over the latent deter states for all players
+  recurrent_state: chex.Array # The recurrent network state for all players
+  deter_state: chex.Array # The one-hot sampled outcome of the categoricals for all players
+  stoch_state: chex.Array # The softmaxed distribution over the latent deter states for all players
                           # with the invalid outcomes already filtered out.
+  prev_action:chex.Array #Previous action needed for the latent infoset
+  joint_latent_infoset: chex.Array # The latent infoset
 
 u8 = jnp.uint8
 f32 = jnp.float32
@@ -62,33 +64,33 @@ class DreamerModelGame(JaxGame):
     self.num_categories = model.wm_config.encoded_categories
 
     self.deter_state_size = self.num_classes * self.num_categories
+    self.latent_infoset_size = model.latent_infoset_size
     self.players = model.game.num_players()
 
     self.actions = model.game.num_distinct_actions()
-    self.total_classes = self.num_classes * self.players
 
-    self.max_chance_outcomes = self.game.max_chance_outcomes() * self.num_categories ** (self.total_classes)
+    self.max_chance_outcomes = self.game.max_chance_outcomes() * self.num_categories ** (self.num_classes)
     #Every step will have a corresponding chance node
     self.trajectory_max = 2 * model.trajectory_max
 
     self.probabilty_threshold = probability_threshold
 
     
-    class_indices = jnp.tile(jnp.arange(self.num_categories), (self.total_classes, 1))
+    class_indices = jnp.tile(jnp.arange(self.num_categories), (self.num_classes, 1))
     #Precomputing the indices of the individual outcomes. These will be the same
     # only the probabilities will differ. 
-    # shape [self.num_categories ** (self.total_classes), self.total_classes]
+    # shape [self.num_categories ** (self.num_classes), self.num_classes]
     self.outcome_indices = cartesian_product(*class_indices)
-    self.init_joint_recurrent = self.ma_rssm.get_init_recurrent()
-    self.use_real_iset = model.use_real_iset
+    self.init_recurrent = self.ma_rssm.get_init_recurrent()
+    self.use_real_infoset = model.use_real_infoset
 
     self.cache_model_calls()
 
   
   @partial(jax.jit, static_argnums=0)
   def get_real_game_obs(self, game_state: GameState):
-    _, p1_iset, p2_iset, _ = self.game.get_info(game_state)
-    return jnp.stack([p1_iset, p2_iset], axis=0)
+    _, p1_infoset, p2_infoset, _ = self.game.get_info(game_state)
+    return jnp.stack([p1_infoset, p2_infoset], axis=0)
 
 
   def get_chance_outcomes(self, game_state: ModelGameState):
@@ -110,14 +112,9 @@ class DreamerModelGame(JaxGame):
     get_stochs = jax.vmap(self.cached_encoder, in_axes=(None, 0), out_axes=0)
     vectorized_obs = jax.vmap(self.get_real_game_obs, in_axes=0)
     states, terminals, rewards, legals, probs = jax.lax.cond(self.game.is_chance(game_state.game_state), unroll_game_chance, unroll_no_chance)
-    #jax.debug.print(f'{states}')
     observations = vectorized_obs(states)
-    #jax.debug.print(f'{observations}')
-    #jax.debug.breakpoint()
-    stochs = get_stochs(game_state.joint_recurrent_state, observations)
+    stochs = get_stochs(game_state.recurrent_state, observations)
     num_outcomes = terminals.shape[0]
-    #Reshape to put the player dimension into classes
-    stochs = stochs.reshape((num_outcomes, self.total_classes, self.num_categories))
     #Threshold and renormalize the stochs
     # Shape [Next observations, Classes, Categories]
     stochs = stochs * (stochs >= self.probabilty_threshold)
@@ -126,17 +123,21 @@ class DreamerModelGame(JaxGame):
     # Shape [Categories ** Classes, Classes, Categories]
     all_deters = jax.nn.one_hot(self.outcome_indices, self.num_categories, axis=-1, dtype=u8)
     #We want to get the probabilities of every deterministic
-    # state conditioned on receiving the observation. We can do this with broadcasting
+    # state conditioned on receiving the observation. We can do this
     # by broadcasting the deters along observation dimension
     # and the stoch probabilities along the outcome dimension
     #Shape [Next_observations, Categories ** Classes]
     deter_probs = jnp.prod(jnp.sum(stochs[:, None, ...] * all_deters[None, ...], axis=-1), axis=-1)
     #Also multiply by the chance outcome probabilities and flatten
     outcome_probs = (deter_probs * probs[:, None]).ravel()
-    #Reshape the stochastic and deterministic states again
-    # to include the player dimension
-    stochs = stochs.reshape((num_outcomes, self.players, self.num_classes, self.num_categories))
-    deters = all_deters.reshape((all_deters.shape[0], self.players, self.num_classes, self.num_categories)) 
+
+    #Get the new latent infosets.
+    # We need to vmap over the real game outcome dimension,
+    # but only for the observation. The rest will stay constant for
+    # all chance outcomes
+    vectorized_latent_infosets = jax.vmap(self.cached_infoset_net, in_axes=(None, 0, None), out_axes=(0))
+
+    new_latent_infosets = vectorized_latent_infosets(game_state.joint_latent_infoset, observations, game_state.prev_action)
 
     #Now create the outcomes We can repeat most of the data
     # for each deterministic state, when fixing a given observation
@@ -145,9 +146,11 @@ class DreamerModelGame(JaxGame):
                               reward = rewards[:, None, ...],
                               terminal=terminals[:, None, ...],
                               turn = jnp.full((num_outcomes, 1), game_state.turn + 1),
-                              joint_recurrent_state = game_state.joint_recurrent_state[None, None, ...],
-                              joint_deter_state=deters[None, ...],
-                              joint_stoch_state=stochs[:, None, ...])
+                              recurrent_state = game_state.recurrent_state[None, None, ...],
+                              deter_state=all_deters[None, ...],
+                              stoch_state=stochs[:, None, ...],
+                              prev_action=game_state.prev_action[None, None, ...],
+                              joint_latent_infoset=new_latent_infosets[:, None, ...])
     
     def repeat_and_flatten(x: chex.Array):
       """Helper function, repeat as needed over the first two axes and flatten them into
@@ -162,8 +165,6 @@ class DreamerModelGame(JaxGame):
     return outcomes, outcome_probs
 
 
-
-  
   def params_dict(self) ->dict:
     return self.game.params_dict()
 
@@ -183,7 +184,7 @@ class DreamerModelGame(JaxGame):
     return self.trajectory_max
   
   def information_state_tensor_shape(self):
-    if self.use_real_iset:
+    if self.use_real_infoset:
       return self.game.information_state_tensor_shape()
     return self.recurrent_state_size + (self.num_categories ** self.num_classes)
   
@@ -195,32 +196,27 @@ class DreamerModelGame(JaxGame):
     """Cache calls to the model networks for the given model.
     This is called on init automatically and should be called again when
     the model networks update"""
-    # def predictors_wrapper(graphdef: nnx.GraphDef, state: nnx.State, recurrent_state:chex.Array,
-    #                     deter_state: chex.Array):
-    #   ma_rssm = nnx.merge(graphdef, state)
-    #   reward, terminal, legal = ma_rssm.get_predictor_no_jit(recurrent_state, deter_state)
-    #   return reward, terminal, legal
-
-    # def decoders_wrapper(graphdef: nnx.GraphDef, state: nnx.State, joint_recurrent_state: chex.Array,
-    #                      joint_deter_state: chex.Array):
-    #   ma_rssm = nnx.merge(graphdef, state)
-    #   decoded_obs = ma_rssm.get_decoder_all_no_jit(joint_recurrent_state, joint_deter_state)
-    #   return decoded_obs
     
-    def next_recur_wrapper(graphdef: nnx.GraphDef, state: nnx.State, joint_recurrent_state:chex.Array,
-                        joint_deter_state: chex.Array, action: chex.Array):
+    def next_recur_wrapper(graphdef: nnx.GraphDef, state: nnx.State, recurrent_state:chex.Array,
+                        deter_state: chex.Array, action: chex.Array):
       ma_rssm = nnx.merge(graphdef, state)
-      next_joint_recurrent = ma_rssm.get_next_recurrent_all_no_jit(joint_recurrent_state, joint_deter_state, action)
-      return next_joint_recurrent
+      next_recurrent = ma_rssm.get_next_recurrent_no_jit(recurrent_state, deter_state, action)
+      return next_recurrent
     
-    def encoder_wrapper(graphdef: nnx.GraphDef, state: nnx.State, joint_recurrent_state: chex.Array, joint_obs: chex.Array):
+    def next_infosets_wrapper(graphdef: nnx.GraphDef, state: nnx.State, joint_latent_infosets: chex.Array,
+                           obs: chex.Array, prev_action: chex.Array):
       ma_rssm = nnx.merge(graphdef, state)
-      joint_stoch_logits = ma_rssm.get_enc_all_no_jit(joint_recurrent_state, joint_obs)
-      joint_stoch_unfiltered = nnx.softmax(joint_stoch_logits, axis=-1)
-      joint_stoch_unnormalized = joint_stoch_unfiltered * (joint_stoch_unfiltered >= self.probabilty_threshold)
-      normalization = jnp.sum(joint_stoch_unnormalized, axis=-1, keepdims=True)
+      next_infosets = ma_rssm.get_next_infoset_all_no_jit(joint_latent_infosets, obs, prev_action)
+      return next_infosets
+    
+    def encoder_wrapper(graphdef: nnx.GraphDef, state: nnx.State, recurrent_state: chex.Array, obs: chex.Array):
+      ma_rssm = nnx.merge(graphdef, state)
+      stoch_logits = ma_rssm.get_encoder_no_jit(recurrent_state, obs)
+      stoch_unfiltered = nnx.softmax(stoch_logits, axis=-1)
+      stoch_unnormalized = stoch_unfiltered * (stoch_unfiltered >= self.probabilty_threshold)
+      normalization = jnp.sum(stoch_unnormalized, axis=-1, keepdims=True)
       normalization = normalization + (normalization == 0)
-      stoch = joint_stoch_unnormalized / normalization
+      stoch = stoch_unnormalized / normalization
       return stoch
 
     ma_rssm_graphdef, ma_rssm_state = nnx.split(self.ma_rssm)
@@ -228,6 +224,7 @@ class DreamerModelGame(JaxGame):
     #self.cached_decoder = partial(decoders_wrapper, ma_rssm_graphdef, ma_rssm_state)
     self.cached_encoder = partial(encoder_wrapper, ma_rssm_graphdef, ma_rssm_state)
     self.cached_sequential = partial(next_recur_wrapper, ma_rssm_graphdef, ma_rssm_state)
+    self.cached_infoset_net = partial(next_infosets_wrapper, ma_rssm_graphdef, ma_rssm_state)
 
     #self.get_init_chance_outcomes()
 
@@ -238,24 +235,24 @@ class DreamerModelGame(JaxGame):
     init_game_state, _ = self.game.initialize_structures()
     #Assuming the original game produces some output even in chance node
     init_obs = self.get_real_game_obs(init_game_state)
-    init_joint_deter = jnp.zeros((self.players, self.num_classes, self.num_categories), dtype=u8)
+    init_deter = jnp.zeros((self.players, self.num_classes, self.num_categories), dtype=u8)
     #Get the actual stochastic state, if the
     # original game starts with a chance node
-    init_joint_stoch = self.cached_encoder(self.init_joint_recurrent, init_obs)
+    init_stoch = self.cached_encoder(self.init_recurrent, init_obs)
     init_legals = jnp.ones((self.players, self.actions), dtype=u8)
     init_state = ModelGameState(turn=0, game_state=init_game_state,
                                 terminal=jnp.array(False, dtype=bool),
                                 reward=jnp.array(0, dtype=f32),
-                                legals=init_legals, joint_recurrent_state=self.init_joint_recurrent,
-                                 joint_deter_state=init_joint_deter,
-                                 joint_stoch_state=init_joint_stoch)
+                                legals=init_legals, recurrent_state=self.init_recurrent,
+                                 deter_state=init_deter,
+                                 stoch_state=init_stoch)
     return init_state, init_legals
   
   @partial(jax.jit, static_argnums=0)
   def get_info(self, game_state: ModelGameState):
-    """Follows the jax game  state_tensor, p1_iset, p2_iset, public_state convention
-    in our case, defining the  player model infoset as [recurrent_state[pl], deter_state[pl]]
-    and the model state as [p1_model_infoset, p2_model_infoset],
+    """Follows the jax game  state_tensor, p1_infoset, p2_infoset, public_state convention
+    in our case, defining the  player model infoset latent_infoset of pl
+    and the model state as [recurrent_state, deterministic_categorical_state],
     it is model_state, p1_model_infoset, p2_model_infoset, model_state.
     IMPORTANT: As it is unclear how to recover the public state
     from the model infosets, we just return the perfect information
@@ -263,27 +260,24 @@ class DreamerModelGame(JaxGame):
     However, this is just invalid output and it does NOT represent
     the actual public state."""
     #Return the real environment info, if the config is set up that way
-    if self.use_real_iset:
+    if self.use_real_infoset:
       return self.game.get_info(game_state.game_state)
-
-    flat_joint_deter = jnp.reshape(game_state.joint_deter_state, (*game_state.joint_deter_state.shape[:-2], -1))
     
-    p1_model_iset = jnp.concatenate([game_state.joint_recurrent_state[0], flat_joint_deter[0]], axis=0)
-    p2_model_iset = jnp.concatenate([game_state.joint_recurrent_state[1], flat_joint_deter[1]], axis=0)
+    p1_model_infoset, p2_model_infoset = game_state.joint_latent_infoset[0], game_state.joint_latent_infoset[1]
 
-    model_state = jnp.concatenate([p1_model_iset, p2_model_iset], axis=0)
+    model_state = jnp.concatenate([game_state.recurrent_state, game_state.deter_state.ravel()], axis=0)
 
-    return model_state, p1_model_iset, p2_model_iset, model_state
+    return model_state, p1_model_infoset, p2_model_infoset, model_state
   
 
   def state_tensor_shape(self)->int:
-    return self.recurrent_state_size + self.deter_state_size
+    return self.recurrent_state_size + self.deter_state_size if not self.use_real_infoset else self.game.state_tensor_shape()
   
   def public_state_tensor_shape(self)->int:
-    return self.state_tensor_shape()
+    return self.state_tensor_shape() if not self.use_real_infoset else self.game.public_state_tensor_shape()
   
   def information_state_tensor_shape(self)->int:
-    return self.state_tensor_shape() + self.players
+    return self.latent_infoset_size if not self.use_real_infoset else self.game.information_state_tensor_shape()
 
   @partial(jax.jit, static_argnums=0)
   def apply_action(self, game_state: ModelGameState, action: chex.Array):
@@ -293,51 +287,6 @@ class DreamerModelGame(JaxGame):
                         , self.apply_action_no_chance, game_state, action)
     return new_state, terminal, reward, new_legal
 
-  # def get_closest_next_idx(self, recurrent_state: chex.Array, deter: chex.Array, 
-  #                          next_states: GameState, next_state_probs: chex.Array):
-  #   dec_output = self.cached_decoder(recurrent_state, deter)
-  #   vectorized_get_obs = jax.vmap(self.game.get_info, in_axes=(0), out_axes=0)
-  #   _, p1_obs, p2_obs, _= vectorized_get_obs(next_states)
-  #   obs = jnp.stack([p1_obs, p2_obs], axis=1)
-  #   next_dist = jnp.sum((dec_output[None, ...] - obs) ** 2, axis=(-1, -2))
-  #   max_dist = jnp.max(next_dist)
-  #   #Mask out the states that cannot happen
-  #   valid = next_state_probs >= 1e-8
-  #   next_dist = valid * (next_dist) + (1 - valid) * (max_dist + 1)
-  #   return jnp.argmin(next_dist)
-
-
-
-
-  # @partial(jax.jit, static_argnums=0)
-  # def expand_states(self, game_state: ModelGameState, next_deters: chex.Array):
-  #   is_chance = self.game.is_chance(game_state.game_state)
-  #   num_outcomes = next_deters.shape[0]
-  #   def no_chance_next():
-  #     def tile_x(x):
-  #       return jnp.repeat(x[None, ...], num_outcomes, axis=0)
-  #     game_states = jax.tree.map(lambda x: tile_x(x), game_state.game_state)
-  #     rewards = tile_x(game_state.reward)
-  #     terminals = tile_x(game_state.terminal)
-  #     legals = tile_x(game_state.legals)
-  #     return game_states, terminals, rewards, legals
-  #   def chance_next():
-  #     # Unroll the chance node (including
-  #     # not reacheable outcomes as well, to be jittable.)
-  #      # and then select the closest state based 
-  #      # on decoder for each deter. This will
-  #      # be VERY expensive and work only for small instances.
-  #      next_chance_outcomes, next_chance_probs = self.game.get_outcomes_and_probs(game_state.game_state)
-  #      #Do not vmap over the current state, that will be the same.
-  #      vectorized_apply_action = jax.vmap(self.game.apply_action, in_axes=(None, 0))
-  #      next_game_states, next_terminal, next_rewards, next_legal = vectorized_apply_action(game_state.game_state, next_chance_outcomes)
-  #      #vmap only over the deter states
-  #      vectorized_closest_idx = jax.vmap(self.get_closest_next_idx, in_axes=(None, 0, None, None), out_axes=0)
-  #      closest_indices = vectorized_closest_idx(game_state.joint_recurrent_state, next_deters, next_game_states, next_chance_probs)
-  #      game_states = jax.tree.map(lambda x : x[closest_indices], next_game_states)
-  #      rewards, terminals, legals = next_rewards[closest_indices], next_terminal[closest_indices], next_legal[closest_indices]
-  #      return game_states, terminals, rewards, legals.astype(u8)
-  #   return jax.lax.cond(is_chance, chance_next, no_chance_next)
 
   @partial(jax.jit, static_argnums=0)
   def apply_action_chance(self, game_state: ModelGameState, action: chex.Array):
@@ -357,11 +306,11 @@ class DreamerModelGame(JaxGame):
   @partial(jax.jit, static_argnums=(0))
   def apply_action_no_chance(self, game_state: ModelGameState, action: chex.Array):
     action_oh = jax.nn.one_hot(action, self.actions, axis=-1)
-    next_joint_recurrent = self.cached_sequential(game_state.joint_recurrent_state, game_state.joint_deter_state, action_oh)
+    next_recurrent = self.cached_sequential(game_state.recurrent_state, game_state.deter_state, action_oh)
     #The deterministic states are sampled at chance nodes
-    next_joint_deter = jnp.zeros_like(game_state.joint_deter_state)
+    next_deter = jnp.zeros_like(game_state.deter_state)
     obs = self.get_real_game_obs(game_state.game_state)
-    next_joint_stoch = self.cached_encoder(next_joint_recurrent, obs)
+    next_stoch = self.cached_encoder(next_recurrent, obs)
 
     next_game_state, game_term, game_rew, game_legals = self.game.apply_action(game_state.game_state, action)
 
@@ -376,9 +325,9 @@ class DreamerModelGame(JaxGame):
                                 legals = game_legals.astype(u8),
                                 reward=game_rew,
                                 terminal=game_term,
-                                joint_recurrent_state= next_joint_recurrent,
-                                joint_deter_state= next_joint_deter,
-                                joint_stoch_state=next_joint_stoch)
+                                recurrent_state= next_recurrent,
+                                deter_state= next_deter,
+                                stoch_state=next_stoch)
     
     return next_state, next_terminal, next_reward, next_legals
 

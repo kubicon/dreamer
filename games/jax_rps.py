@@ -43,7 +43,7 @@ class JaxRPS(JaxGame):
   def information_state_tensor_shape(self):
     return 8 # 2 for player encoding, 2 for the terminal flag, 4 for player 1 points
     # this is just the observation tensor of the current state, but because the game is only a single turn, it corresponds
-    # to the perfect recall iset 
+    # to the perfect recall infoset 
 
   def observation_tensor_shape(self):
     return self.information_state_tensor_shape()
@@ -74,10 +74,10 @@ class JaxRPS(JaxGame):
     terminal_oh = jax.nn.one_hot(game_state.terminal.astype(int), 2) 
     p1_points_oh = jax.nn.one_hot(game_state.p1_points + 2, 4)
     state_tensor = jnp.concatenate([terminal_oh.ravel(), p1_points_oh.ravel()], axis=0)
-    p1_iset_tensor = jnp.concatenate([jax.nn.one_hot(0, 2), state_tensor], axis=0)
-    p2_iset_tensor = jnp.concatenate([jax.nn.one_hot(1, 2), state_tensor], axis=0)
-    #We use just p1 points for state_tensor, public state tensor and p2_iset_tensor as well, since they uniquely define p2 points as well
-    return state_tensor, p1_iset_tensor, p2_iset_tensor, state_tensor
+    p1_infoset_tensor = jnp.concatenate([jax.nn.one_hot(0, 2), state_tensor], axis=0)
+    p2_infoset_tensor = jnp.concatenate([jax.nn.one_hot(1, 2), state_tensor], axis=0)
+    #We use just p1 points for state_tensor, public state tensor and p2_infoset_tensor as well, since they uniquely define p2 points as well
+    return state_tensor, p1_infoset_tensor, p2_infoset_tensor, state_tensor
   
   @functools.partial(jax.jit, static_argnums=(0,))
   def apply_action(self, game_state:RPSSTate, actions):
@@ -170,12 +170,12 @@ class JaxStochasticRPS(JaxGame):
     game_played_oh = jax.nn.one_hot(game_state.game_type, self.game_types)
     state_tensor = jnp.concatenate([terminal_oh.ravel(), p1_points_oh.ravel(), game_played_oh], axis=0)
     state_tensor = jnp.where(game_state.is_chance, jnp.zeros_like(state_tensor), state_tensor)
-    p1_iset_tensor = jnp.concatenate([jax.nn.one_hot(0, 2), state_tensor], axis=0)
-    p2_iset_tensor = jnp.concatenate([jax.nn.one_hot(1, 2), state_tensor], axis=0)
-    p1_iset_tensor = jnp.where(game_state.is_chance, jnp.zeros_like(p1_iset_tensor), p1_iset_tensor)
-    p2_iset_tensor = jnp.where(game_state.is_chance, jnp.zeros_like(p2_iset_tensor), p2_iset_tensor)
-    #We use just p1 points for state_tensor, public state tensor and p2_iset_tensor as well, since they uniquely define p2 points as well
-    return state_tensor, p1_iset_tensor, p2_iset_tensor, state_tensor
+    p1_infoset_tensor = jnp.concatenate([jax.nn.one_hot(0, 2), state_tensor], axis=0)
+    p2_infoset_tensor = jnp.concatenate([jax.nn.one_hot(1, 2), state_tensor], axis=0)
+    p1_infoset_tensor = jnp.where(game_state.is_chance, jnp.zeros_like(p1_infoset_tensor), p1_infoset_tensor)
+    p2_infoset_tensor = jnp.where(game_state.is_chance, jnp.zeros_like(p2_infoset_tensor), p2_infoset_tensor)
+    #We use just p1 points for state_tensor, public state tensor and p2_infoset_tensor as well, since they uniquely define p2 points as well
+    return state_tensor, p1_infoset_tensor, p2_infoset_tensor, state_tensor
   
   @functools.partial(jax.jit, static_argnums=(0,))
   def get_outcomes_and_probs(self, game_state: JaxStochasticRPSState):

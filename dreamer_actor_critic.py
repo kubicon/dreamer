@@ -105,7 +105,7 @@ class DreamerActorCritic():
     self.actions = game.num_distinct_actions()
     self.num_players = game.num_players()
     ma_rssm = self.optimizer.model
-    self.use_real_iset = ma_rssm.use_real_iset
+    self.use_real_infoset = ma_rssm.use_real_infoset
     self.input_size = ma_rssm.infoset_size
 
     num_last = self.config.num_last
@@ -230,7 +230,7 @@ class DreamerActorCritic():
         return beta_real * loss_val, (new_range, metrics)
       
     
-    ac_timestep = wm_timestep_to_timestep(wm_timestep, wm_prediction_step, self.use_real_iset)  
+    ac_timestep = wm_timestep_to_timestep(wm_timestep, wm_prediction_step, self.use_real_infoset)  
     starting_points = jax.tree.map(lambda x: x[-self.num_last: ].reshape((-1, *x.shape[2:])), wm_prediction_step)
     #starting_points = jax.tree.map(lambda x: x[0].reshape((-1, *x.shape[2:])), wm_prediction_step)
     #jax.tree.map(lambda x: print(x.shape), starting_points)

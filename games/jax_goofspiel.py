@@ -92,13 +92,13 @@ class JaxGoofspiel(JaxGame):
     
     p1_player = jax.nn.one_hot(0, 2)
     
-    p1_iset_tensor = jnp.concatenate([p1_player, public_state_tensor, jnp.ravel(game_state.played_cards[0])], axis=0)
-    p2_iset_tensor = jnp.concatenate([1 - p1_player, public_state_tensor, jnp.ravel(game_state.played_cards[1])], axis=0)
+    p1_infoset_tensor = jnp.concatenate([p1_player, public_state_tensor, jnp.ravel(game_state.played_cards[0])], axis=0)
+    p2_infoset_tensor = jnp.concatenate([1 - p1_player, public_state_tensor, jnp.ravel(game_state.played_cards[1])], axis=0)
     
     state_tensor = jnp.concatenate([public_state_tensor, jnp.ravel(game_state.played_cards)], axis=0)
     
     
-    return state_tensor, p1_iset_tensor, p2_iset_tensor, public_state_tensor
+    return state_tensor, p1_infoset_tensor, p2_infoset_tensor, public_state_tensor
   
   @functools.partial(jax.jit, static_argnums=(0,))
   def apply_action(self, game_state:GoofspielGameState, actions):

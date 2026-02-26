@@ -6,7 +6,7 @@ import jax.numpy as jnp
 from train_utils import symlog
 import chex
 
-def add_uniform_mix(logits: jax.Array, uniform_mix: float = 0.01):
+def add_uniform_mix(logits: chex.Array, uniform_mix: float = 0.01):
   """Creates a mixture between the actual logits induced distribution
   and uniform distribution, to prevent KL losses spike early
   as described in https://arxiv.org/pdf/2301.04104 page 5. """
@@ -18,7 +18,7 @@ def add_uniform_mix(logits: jax.Array, uniform_mix: float = 0.01):
   logits_with_uniform = jnp.log(probs)
   return logits_with_uniform
 
-def sample_categorical(logits: jax.Array, key, sample_threshold: float = 0.0)-> jax.Array:
+def sample_categorical(logits: chex.Array, key, sample_threshold: float = 0.0)-> chex.Array:
   """Given a PRNG key produced by split, sample from each
   of the categorical distributions logits and return the
   one-hot encoded outcome for each of the distributions.
@@ -48,7 +48,7 @@ def sample_categorical(logits: jax.Array, key, sample_threshold: float = 0.0)-> 
   output = jax.lax.stop_gradient(oh_sampled_classes) + (probs - jax.lax.stop_gradient(probs))
   return output
 
-def get_normal_log_prob(mean_logits: jax.Array, value: jax.Array, use_symlog=False) ->jax.Array:
+def get_normal_log_prob(mean_logits: chex.Array, value: chex.Array, use_symlog=False) ->chex.Array:
   """Get log prob of the normal distributions represented by the predictor outputs.
   Since the predictors output logits for mean and variance is assumed to be one, 
   the log prob reduces to -MSE. Can use the symlog transformation from https://arxiv.org/pdf/2301.04104
@@ -59,7 +59,7 @@ def get_normal_log_prob(mean_logits: jax.Array, value: jax.Array, use_symlog=Fal
   log_prob = -(value - mean_logits) **2
   return log_prob
 
-def get_bin_log_prob(dist_logits: jax.Array, bins: jax.Array,  value: jax.Array, use_symlog = True)->jax.Array:
+def get_bin_log_prob(dist_logits: chex.Array, bins: chex.Array,  value: chex.Array, use_symlog = True)->chex.Array:
   """Get log prob of the discrete distribution corresponding to the exponentially spaced bins.
   From https://arxiv.org/pdf/2301.04104  page 7. First two hot encodes value, and the 
   final log prob is twohot(value) * logsoftmax(dist_logits). 
@@ -72,9 +72,15 @@ def get_bin_log_prob(dist_logits: jax.Array, bins: jax.Array,  value: jax.Array,
   #[Trajectory, Batch, 2 * bin_range + 1]
   val_two_hot = two_hot_encode(bins, value, use_symlog=use_symlog)
   return val_two_hot * jax.nn.log_softmax(dist_logits)
+
+def get_categorical_prob(dist_logits: chex.Array, oh_target: chex.Array):
+  """Gets the probability of the one-hot encoded target under the categorical
+  distribution parametrized by dist_logits as oh_target * logsoftmax(dist_logits)"""
+  chex.assert_equal_shape((dist_logits, oh_target))
+  return oh_target * jax.nn.log_softmax(dist_logits)
    
 
-def two_hot_encode(bins: jax.Array, value:jax.Array, use_symlog= True) -> jax.Array:
+def two_hot_encode(bins: chex.Array, value:chex.Array, use_symlog= True) -> chex.Array:
   """Perform the two hot encoding of value (by default transformed by symlog)
   in the range of bins. There will be two nonzero values of the two closest bins, 
   with values proportional to the bin closeness."""
@@ -112,7 +118,7 @@ def two_hot_encode(bins: jax.Array, value:jax.Array, use_symlog= True) -> jax.Ar
 
   return two_hot
 
-def kl_divergence(orig: jax.Array, other: jax.Array) ->jax.Array:
+def kl_divergence(orig: chex.Array, other: chex.Array) ->chex.Array:
   """Computes KL divergence. Expects both orig and other to already be softmaxed
   into probability distributions. Returning kl_divergence is summed over the last two dimensions
   [categoricals, classes]."""

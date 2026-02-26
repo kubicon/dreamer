@@ -2,7 +2,7 @@
 from games.jax_point_card_matching import PointCardMatching, PointCardMatchingStochastic
 from experiments.parsing_utils import prepare_experiment_parser
 
-from experiments.joint_train import joint_train_loop
+from experiments.joint_train import train
 
 parser = prepare_experiment_parser()
 # Game parameters
@@ -15,7 +15,7 @@ parser.add_argument("--chance_turn_before_terminal", type=int, default=1, help="
 def main():
   args = parser.parse_args()
   game = PointCardMatchingStochastic(args.num_cards, chance_turn_before_terminal=args.chance_turn_before_terminal) if args.stochastic else PointCardMatching(args.num_cards)
-  joint_train_loop(args, game)
+  train(args, game)
 
 if __name__ == "__main__":
   main()

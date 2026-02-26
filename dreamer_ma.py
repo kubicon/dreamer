@@ -8,7 +8,7 @@ from functools import partial
 
 
 from train_utils import *
-from distributions import get_normal_log_prob, get_bin_log_prob, kl_divergence, sample_categorical, add_uniform_mix
+from distributions import *
 from ma_rssm import *
 from replay_buffer import ReplayBuffer
 from dreamer_actor_critic import DreamerActorCritic
@@ -57,7 +57,8 @@ class DreamerMA():
 
     self.action_dimension = self.game.num_distinct_actions()
     self.infoset_size = ma_rssm.infoset_size
-    self.use_real_iset = ma_rssm.use_real_iset
+    self.latent_infoset_size = ma_rssm.latent_infoset_size
+    self.use_real_infoset = ma_rssm.use_real_infoset
     assert self.game.num_players() > 1, f"This implementation of Dreamer assumes a game with at least 2 players not {self.game.num_players()}"
     self.recurrent_state_size = ma_rssm.rec_state_size
     self.use_rnad = ma_rssm.use_rnad
@@ -88,9 +89,12 @@ class DreamerMA():
     #self.wm_cached_train = nnx.cached_partial(self.update_world_model, self.optimizer)
     policy_network = ma_rssm.actor_critic if ma_rssm.use_rnad else ma_rssm.actor
     #Also cache the sampling for the buffer
-    self.buffer.cache_sampling(ma_rssm.seq, ma_rssm.enc, ma_rssm.observer, policy_network)
+    self.buffer.cache_sampling(ma_rssm.seq, ma_rssm.enc, ma_rssm.observer, ma_rssm.infoset_network, policy_network)
     self.grad_norms = {k: 0 for k in self.network_keys} 
     self.metrics = {'dec': 0, 'con': 0, 'leg': 0,  'rew': 0, 'dyn': 0, 'rep': 0}
+    #Add the infoset losses, if we should compute them
+    if not self.use_real_infoset:
+      self.metrics.update({'is_obs_dec' : 0, 'is_act_dec': 0, 'is_pred': 0})
     
   
   def generate_key(self):
@@ -113,37 +117,59 @@ class DreamerMA():
       l_pred, l_dyn, l_rep = 0, 0, 0
       #[Trajectory, Batch, ...]
       @nnx.scan(in_axes=(nnx.Carry, 0, None), out_axes=(nnx.Carry, 0))
-      def _predict_over_timestep(joint_recurrent_state, xs, model: MARSSM):
+      def _predict_over_timestep(carry, xs, model: MARSSM):
         
-        action, obs, cur_key = xs
-        joint_stochastic_state = model.get_enc_all_no_jit(joint_recurrent_state, obs)
-        joint_stochastic_state = add_uniform_mix(joint_stochastic_state, self.wm_config.uniform_mix)
-        joint_deterministic_state = sample_categorical(joint_stochastic_state, cur_key)
-        joint_prior_stochastic_state = model.get_dyn_all_no_jit(joint_recurrent_state)
-        joint_prior_stochastic_state = add_uniform_mix(joint_prior_stochastic_state, self.wm_config.uniform_mix)
-        reward, done = model.rew(joint_recurrent_state, joint_deterministic_state), model.term(joint_recurrent_state, joint_deterministic_state)
-        legal = model.leg(joint_recurrent_state, joint_deterministic_state)
+        recurrent_state, prev_latent_infoset, timestep = carry
+        action, obs, prev_action, cur_key = xs
+        #Previous action is used for the infoset 
+        # at the current timestep. At first step, 
+        # there was no previous action so we zero it out
+        prev_action = jnp.where(timestep == 0, 0, prev_action)
+        stochastic_state = model.get_encoder_no_jit(recurrent_state, obs)
+        stochastic_state = add_uniform_mix(stochastic_state, self.wm_config.uniform_mix)
+        deterministic_state = sample_categorical(stochastic_state, cur_key)
+        prior_stochastic_state = model.get_dynamics_no_jit(recurrent_state)
+        prior_stochastic_state = add_uniform_mix(prior_stochastic_state, self.wm_config.uniform_mix)
+        reward, done = model.rew(recurrent_state, deterministic_state), model.term(recurrent_state, deterministic_state)
+        legal = model.leg(recurrent_state, deterministic_state)
         #Dont use symexp here during training. Otherwise we would be training
         # the symexp outputs to match the symlog inputs.
-        decoded_obs = model.get_decoder_all_no_jit(joint_recurrent_state, joint_deterministic_state, use_symexp=False)
-        new_hidden = model.get_next_recurrent_all_no_jit(joint_recurrent_state, joint_deterministic_state, action)
+        decoded_obs = model.get_decoder_no_jit(recurrent_state, deterministic_state, use_symexp=False)
+        new_recurrent = model.get_next_recurrent_no_jit(recurrent_state, deterministic_state, action)
+        if not ma_rssm.use_real_infoset:
+          new_latent_infosets = model.get_next_infoset_all_no_jit(prev_latent_infoset, obs, prev_action)
+          infoset_decoded_obs, infoset_decoded_actions = model.get_infoset_decoder_all_no_jit(new_latent_infosets)
+          infoset_predicted_recurrent, infoset_predicted_deter = model.infoset_predictor(new_latent_infosets)
+        else:
+          new_latent_infosets = prev_latent_infoset
+          infoset_decoded_obs, infoset_decoded_actions, infoset_predicted_recurrent, infoset_predicted_deter = 0, 0, 0, 0
         preds = PredictionStepWithLegal(
-                                joint_recurrent_state = joint_recurrent_state,
-                                joint_repr_state = joint_stochastic_state,
-                                joint_deter_state = joint_deterministic_state,
+                                recurrent_state = recurrent_state,
+                                repr_state = stochastic_state,
+                                deter_state = deterministic_state,
                                 decoded_obs = decoded_obs,
                                 reward_dist_logit = reward,
                                 done_logit = done,
                                 legal_logit = legal,
-                                joint_dynamics_state = joint_prior_stochastic_state) 
+                                dynamics_state = prior_stochastic_state,
+                                joint_latent_infoset = new_latent_infosets,
+                                infoset_decoded_obs = infoset_decoded_obs,
+                                infoset_decoded_actions = infoset_decoded_actions,
+                                infoset_predicted_recurrent = infoset_predicted_recurrent,
+                                infoset_predicted_deter = infoset_predicted_deter) 
         
-        return new_hidden, preds
+        return (new_recurrent, new_latent_infosets, timestep + 1), preds
       
-      xs = (timestep.action, timestep.obs, sample_keys)
+      
+      previous_actions = jnp.roll(timestep.action, 1, axis=0)
+      xs = (timestep.action, timestep.obs, previous_actions, sample_keys)
       init_recurrent = ma_rssm.get_init_recurrent(self.wm_config.batch_size)
+      #Since the scan treats this as a previous infoset to the current
+      # infoset, we initialize it to all zeros
+      init_latent_infosets = jnp.zeros((self.wm_config.batch_size, self.game.num_players(), self.latent_infoset_size))
       #print(f"Init recur shape {init_recurrent.shape}")
-      vectorized_predict = nnx.vmap(_predict_over_timestep, in_axes=(0, 1, None), out_axes=(0, 1))
-      _, predictions = vectorized_predict(init_recurrent, xs, ma_rssm) 
+      vectorized_predict = nnx.vmap(_predict_over_timestep, in_axes=((0, 0, None), 1,  None), out_axes=(0, 1))
+      _, predictions = vectorized_predict((init_recurrent, init_latent_infosets, 0), xs, ma_rssm) 
 
       #[Trajectory, Batch, num_players, obs_size]
       reconstruction_loss = -get_normal_log_prob(predictions.decoded_obs, timestep.obs, use_symlog=True)
@@ -170,17 +196,49 @@ class DreamerMA():
       #Using free bits to clip dynamics and representation losses
       # thus disabling their gradient when they are below free_bits_clip_threshold
       #[Trajectory, Batch, encoded_categories, encoded_classes]
-      posterior = nnx.softmax(predictions.joint_repr_state, axis=-1)
-      prior = nnx.softmax(predictions.joint_dynamics_state, axis=-1)
+      posterior = nnx.softmax(predictions.repr_state, axis=-1)
+      prior = nnx.softmax(predictions.dynamics_state, axis=-1)
       #[Trajectory, Batch]
       dynamics_loss = kl_divergence(jax.lax.stop_gradient(posterior), prior)
-      l_dyn += jnp.maximum(self.wm_config.free_bits_clip_threshold, get_loss_mean_with_mask(dynamics_loss, timestep.valid[..., None]))
+      l_dyn += jnp.maximum(self.wm_config.free_bits_clip_threshold, get_loss_mean_with_mask(dynamics_loss, timestep.valid))
       #[Trajectory, Batch]
       repr_loss = kl_divergence(posterior, jax.lax.stop_gradient(prior))
-      l_rep += jnp.maximum(self.wm_config.free_bits_clip_threshold, get_loss_mean_with_mask(repr_loss, timestep.valid[..., None]))
+      l_rep += jnp.maximum(self.wm_config.free_bits_clip_threshold, get_loss_mean_with_mask(repr_loss, timestep.valid))
       
-      losses = (dec, con, leg, rew, l_dyn, l_rep)
-      mults = (*(self.wm_config.beta_prediction, ) * 4, self.wm_config.beta_dynamics, self.wm_config.beta_representation)
+      losses = [dec, con, leg, rew, l_dyn, l_rep]
+      mults = [*(self.wm_config.beta_prediction, ) * 4, self.wm_config.beta_dynamics, self.wm_config.beta_representation]
+      l_infoset = 0
+      if not self.use_real_infoset:
+        #Update the latent infosets
+        #The action loss predicts the previous action. Which also means we do not
+        # compute it for the first step
+        previous_valid = jnp.roll(timestep.valid, 1, axis=0)
+        previous_non_terminal = ~jnp.roll(timestep.terminal, 1, axis=0)
+        is_first = jnp.arange(timestep.action.shape[0]) == 0
+        action_loss_mask = is_first[..., None] * previous_valid * previous_non_terminal
+        #These are one-hot encoded. We want to maximize the probability
+        # of seeing the previous action, hence making sure the infoset retains information about it
+        infoset_prev_action_loss = -get_categorical_prob(predictions.infoset_decoded_actions, previous_actions)
+        is_act = get_loss_mean_with_mask(infoset_prev_action_loss, action_loss_mask[..., None, None])
+        l_infoset += is_act
+        #Current observation loss, similar intuition as with the previous action
+        #Reduces to MSE
+        is_obs_loss = -get_normal_log_prob(predictions.infoset_decoded_obs, timestep.obs, use_symlog=True)
+        is_obs = get_loss_mean_with_mask(is_obs_loss, timestep.valid[..., None, None])
+        l_infoset += is_obs
+        # The current recurrent state prediction loss. This together
+        # with the current deter state prediction loss serves to force
+        # perfect recall by making sure that the union of infosets
+        # is enough to get the perfect information state.
+        is_rec_loss = -get_normal_log_prob(predictions.infoset_predicted_recurrent, jax.lax.stop_gradient(predictions.recurrent_state), use_symlog=True)
+        is_rec = get_loss_mean_with_mask(is_rec_loss, timestep.valid[..., None])
+        l_infoset += is_rec
+        is_deter_loss = -get_categorical_prob(predictions.infoset_predicted_deter, jax.lax.stop_gradient(predictions.deter_state))
+        is_deter = get_loss_mean_with_mask(is_deter_loss, timestep.valid[..., None, None])
+        l_infoset += is_deter
+        losses.extend([is_act, is_obs, is_rec, is_deter])
+        mults.extend([*(self.wm_config.beta_infoset, ) * 4])
+
       wm_keys = self.metrics.keys()
       metrics = {k: v * m for k, v, m in zip(wm_keys, losses, mults)}
       

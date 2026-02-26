@@ -12,7 +12,7 @@ from distributions import sample_categorical
 from ma_rssm import MARSSM
 from networks import *
 from games.jax_game import JaxGame, GameState
-from train_utils import TimeStep, BufferConfig, DreamerMAConfig, get_reference_policy, tree_where
+from train_utils import TimeStep, BufferConfig, DreamerMAConfig, tree_where
 
 u8 = jnp.uint8
 nu8 = np.uint8
@@ -72,16 +72,21 @@ class ReplayBuffer():
     self.num_players = self.game.num_players()
     self.trajectory_max = self.game.max_trajectory_length()
     recurrent_state_size = self.wm_config.sequential_network_details[0]
+    latent_infoset_dim = self.wm_config.sequential_network_details[0]
 
     if recurrent_state_size < 1:
-      recurrent_state_size = self.game.information_state_tensor_shape()
+      recurrent_state_size = self.game.information_state_tensor_shape() * self.num_players
+
+    if latent_infoset_dim < 1:
+      latent_infoset_dim = self.game.information_state_tensor_shape()
     self.recurrent_state_size = recurrent_state_size
+    self.latent_infoset_dim = latent_infoset_dim
     #Chance nodes are not explicitly stored in the buffer, instead
     # they are skipped and only the next outcome sampled from it 
     # is stored.
     self.non_chance_trajectory_max = self.game.max_trajectory_lenght_no_chance()
 
-    self.use_iset = self.wm_config.use_original_iset
+    self.use_infoset = self.wm_config.use_original_infoset
     self._get_example_timestep()
 
     self.total_minibatch_size = self.wm_config.batch_size * self.non_chance_trajectory_max
@@ -133,11 +138,11 @@ class ReplayBuffer():
 
   def _get_example_timestep(self):
     #This can produce a chance node, but that 
-    # one by default produces invalid isets
+    # one by default produces invalid infosets
     # and legals so it is not a problem 
     example_state, example_legals = self.game.initialize_structures()
-    _, ex_p1_iset, ex_p2_iset, _ = self.game.get_info(example_state)
-    ex_obs = jnp.stack([ex_p1_iset, ex_p2_iset], axis=0)
+    _, ex_p1_infoset, ex_p2_infoset, _ = self.game.get_info(example_state)
+    ex_obs = jnp.stack([ex_p1_infoset, ex_p2_infoset], axis=0)
     legal = jnp.ones(example_legals.shape, dtype=u8)
     action = jax.nn.one_hot(jnp.argmax(legal, -1), legal.shape[-1]).astype(u8)
     policy = legal.astype(float) / jnp.sum(legal, axis=-1, keepdims=True)
@@ -152,17 +157,9 @@ class ReplayBuffer():
     
 
   def cache_sampling(self, recurrent_network: SequenceModel, encoder_network: Encoder,
-                     observer_network: ObservedPredictor, actor_network: ActorNetwork | RNaDNetwork | None = None):
-    if actor_network is None:
-      #Just put some dummy array there. This is
-      # so that I can train Dreamer only without the actor.
-      # CRUCIAL: Do NOT try to call the trajectory
-      # campling with both the dummy input and with actual
-      # input. It will not work (but I cannot think of 
-      # any reason why I would want to do that.)
-      actor_network = jnp.array(0)
+                     observer_network: ObservedPredictor, infoset_network: InfosetModel, actor_network: ActorNetwork | RNaDNetwork):
     self.cached_sample = nnx.cached_partial(self.sample_batch_trajectories, recurrent_network,
-                                            encoder_network, observer_network, actor_network)
+                                            encoder_network, observer_network, infoset_network, actor_network)
     
   
   def mixed_sample(self, env_sample_key: chex.Array):
@@ -237,11 +234,12 @@ class ReplayBuffer():
 
   def add_batch(self, batch_size: int, sample_key: chex.Array, recurrent_network: SequenceModel| None = None,
                 observer_network: ObservedPredictor | None = None,
-                encoder_network: Encoder | None = None, actor_network: ActorNetwork | RNaDNetwork | None =None):
+                encoder_network: Encoder | None = None, infoset_network: InfosetModel | None = None,
+                actor_network: ActorNetwork | RNaDNetwork | None =None):
     """Sample a batch of trajectories from the environment and add them to the buffer.
     Also returns the trajectories if you want to perform online training on them."""
-    if all([net is not None for net in (recurrent_network, encoder_network, observer_network, actor_network)]):
-      batch_trajectories = self.sample_batch_trajectories(recurrent_network, encoder_network, observer_network, actor_network, batch_size, sample_key)
+    if all([net is not None for net in (recurrent_network, encoder_network, observer_network,infoset_network, actor_network)]):
+      batch_trajectories = self.sample_batch_trajectories(recurrent_network, encoder_network, observer_network, infoset_network, actor_network, batch_size, sample_key)
     else:
       assert self.cached_sample is not None, "The variant of add_batch where one or more of the networks are unset was called, but cached_sample is not set. Please call cache_sampling first."
       batch_trajectories = self.cached_sample(batch_size, sample_key)
@@ -330,30 +328,30 @@ class ReplayBuffer():
     
 
 
-  @partial(nnx.jit, static_argnums=(0, 5))
-  def sample_batch_trajectories(self, recurrent_network: SequenceModel, encoder_network: Encoder, observer_network: ObservedPredictor, actor_network: ActorNetwork | RNaDNetwork, batch_size:int, key):
+  @partial(nnx.jit, static_argnums=(0, 6))
+  def sample_batch_trajectories(self, recurrent_network: SequenceModel, encoder_network: Encoder, observer_network: ObservedPredictor, infoset_network: InfosetModel, actor_network: ActorNetwork | RNaDNetwork, batch_size:int, key):
     batch_keys = jax.random.split(key, batch_size)
-    batch_sample_trajectories = nnx.vmap(self.sample_trajectory, in_axes=(None, None, None, None, 0), out_axes=(1))
-    batch_trajectories = batch_sample_trajectories(recurrent_network, encoder_network, observer_network, actor_network, batch_keys)
+    batch_sample_trajectories = nnx.vmap(self.sample_trajectory, in_axes=(None, None, None, None, None, 0), out_axes=(1))
+    batch_trajectories = batch_sample_trajectories(recurrent_network, encoder_network, observer_network,infoset_network, actor_network, batch_keys)
     return batch_trajectories
 
   @partial(nnx.jit, static_argnums=0)
-  def sample_trajectory(self, recurrent_network: SequenceModel, encoder_network:Encoder, observer_network: ObservedPredictor, actor_network:ActorNetwork | RNaDNetwork, key) ->TimeStep:
+  def sample_trajectory(self, recurrent_network: SequenceModel, encoder_network:Encoder, observer_network: ObservedPredictor, infoset_network: InfosetModel, actor_network:ActorNetwork | RNaDNetwork, key) ->TimeStep:
     trajectory_key = jax.random.split(key, self.trajectory_max)
     actions = self.action_dimension
 
-    vectorized_recur = nnx.vmap(MARSSM.call_net, in_axes=(None, 0, 0, 0), out_axes=0)
-    vectorized_encoder = nnx.vmap(MARSSM.call_net, in_axes=(None, 0, ), out_axes=0)
-    vectorized_observer = nnx.vmap(MARSSM.call_net, in_axes=(None, 0, 0), out_axes=0)
+    vectorized_next_infoset = nnx.vmap(MARSSM.call_net, in_axes=(None, 0, 0, 0), out_axes=(0))
 
     
     #TODO: Will later have to properly split the segments 
     # and also store the starting model state
     game_state, legal_actions = self.game.initialize_structures()
-    dummy_joint_deter = jnp.zeros((self.num_players, self.wm_config.encoded_classes, self.wm_config.encoded_categories))
-    dummy_joint_recur = jnp.zeros((self.num_players, self.recurrent_state_size))
+    dummy_deter = jnp.zeros((self.wm_config.encoded_classes, self.wm_config.encoded_categories))
+    dummy_recur = jnp.zeros((self.recurrent_state_size))
     dummy_action = jnp.zeros((self.game.num_players(), self.game.num_distinct_actions()))
-    init_joint_recur = vectorized_recur(recurrent_network, dummy_joint_recur, dummy_joint_deter, dummy_action)
+
+    init_recur = recurrent_network(dummy_recur, dummy_deter, dummy_action)
+    init_infoset = jnp.zeros((self.num_players, self.latent_infoset_dim))
     
     @chex.dataclass(frozen=True)
     class SampleTrajectoryCarry:
@@ -362,7 +360,9 @@ class ReplayBuffer():
       reward: chex.Array
       terminal: bool
       valid: bool
-      joint_recurrent_state: chex.Array
+      recurrent_state: chex.Array
+      joint_latent_infoset: chex.Array
+      prev_action: chex.Array
       
     init_carry = SampleTrajectoryCarry(
       game_state = game_state,
@@ -370,7 +370,9 @@ class ReplayBuffer():
       reward = jnp.array(0),
       terminal = jnp.array(False),
       valid = jnp.array(True),
-      joint_recurrent_state = init_joint_recur
+      recurrent_state = init_recur,
+      joint_latent_infoset= init_infoset,
+      prev_action = dummy_action
     )
     
     
@@ -388,22 +390,24 @@ class ReplayBuffer():
     #per player vmap
     vectorized_get_actor = nnx.vmap(get_actor_policy, in_axes=(None, 0, 0), out_axes=0)
 
-    @nnx.scan(in_axes=(nnx.Carry, None, None, None, None, 0), out_axes=(nnx.Carry, 0))
+    @nnx.scan(in_axes=(nnx.Carry, None, None, None, None,None, 0), out_axes=(nnx.Carry, 0))
     def _sample_trajectory(carry: SampleTrajectoryCarry, recurrent_network: SequenceModel, encoder_network:Encoder, observer_network: ObservedPredictor,
-                            actor_network:ActorNetwork | RNaDNetwork, key) -> tuple[SampleTrajectoryCarry, chex.Array]:
+                            infoset_network: InfosetModel, actor_network:ActorNetwork | RNaDNetwork, key) -> tuple[SampleTrajectoryCarry, chex.Array]:
       
       
-      state, p1_iset, p2_iset, public_state = self.game.get_info(carry.game_state)
+      state, p1_infoset, p2_infoset, public_state = self.game.get_info(carry.game_state)
       action_key, chance_key, deter_sample_key = jax.random.split(key, 3)
       
-      obs = jnp.stack((p1_iset, p2_iset), axis=0)
-      tokens = vectorized_encoder(encoder_network, obs)
-      encoded_stoch = vectorized_observer(observer_network, carry.joint_recurrent_state, tokens)
+      obs = jnp.stack((p1_infoset, p2_infoset), axis=0)
+      tokens = encoder_network(obs)
+      encoded_stoch = observer_network(carry.recurrent_state, tokens)
       encoded_deter = sample_categorical(encoded_stoch, deter_sample_key, self.stoch_state_sample_threshold)
       obs_for_actor = obs
-      if not self.use_iset:
-        flat_deter = jnp.reshape(encoded_deter, (*encoded_deter.shape[:-2], -1))
-        obs_for_actor = jnp.concatenate([carry.joint_recurrent_state, flat_deter], axis=-1)
+      joint_latent_infoset = carry.joint_latent_infoset
+      if not self.use_infoset:
+        joint_latent_infoset = vectorized_next_infoset(infoset_network, carry.joint_latent_infoset, obs, carry.prev_action)
+        obs_for_actor = joint_latent_infoset
+        
       pi = vectorized_get_actor(actor_network, obs_for_actor, carry.legal_actions)
       #uniform mix to the policy
       normalization = jnp.sum(carry.legal_actions, axis=-1, keepdims=True)
@@ -421,8 +425,6 @@ class ReplayBuffer():
         valid = carry.valid,
         terminal = carry.terminal
       )
-      
-
       def apply_action():
         return self.game.apply_action(carry.game_state, action)
       def sample_chance():
@@ -437,21 +439,25 @@ class ReplayBuffer():
       #Action in terminal state is not valid
       next_terminal = jnp.logical_or(carry.terminal, next_terminal)
       next_valid = jnp.logical_not(carry.terminal)
-      next_joint_recur = vectorized_recur(recurrent_network, carry.joint_recurrent_state, encoded_deter, action_oh)
+      next_recur = recurrent_network(carry.recurrent_state, encoded_deter, action_oh)
+
       new_carry = SampleTrajectoryCarry(
         game_state = next_game_state,
         legal_actions=jnp.where(next_terminal, self.example_timestep.legal, next_legal),
         reward = next_rewards,
         terminal = next_terminal,
         valid = next_valid,
-        joint_recurrent_state = next_joint_recur
+        recurrent_state = next_recur,
+        joint_latent_infoset = joint_latent_infoset,
+        prev_action = action_oh
+
       )
         
       
       timestep = tree_where(carry.valid, timestep, self.example_timestep)
       
       return new_carry, (timestep, is_chance)
-    _, ys = _sample_trajectory(init_carry, recurrent_network, encoder_network, observer_network, actor_network, trajectory_key)
+    _, ys = _sample_trajectory(init_carry, recurrent_network, encoder_network, observer_network, infoset_network,  actor_network, trajectory_key)
     timestep, is_chance = ys
     #This is used to remove the chance nodes from the trajectory
     non_chance = jnp.nonzero(~is_chance, size=self.non_chance_trajectory_max)[0]

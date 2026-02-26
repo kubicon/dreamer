@@ -157,13 +157,13 @@ class JaxGame(ABC):
     and its legal actions"""
     pass
 
-  #returns state_tensor, p1_iset_tensor, p2_iset_tensor, public_state_tensor
+  #returns state_tensor, p1_infoset_tensor, p2_infoset_tensor, public_state_tensor
   # for multi agent and state_tensor, observation_tensor for single agent
   @abstractmethod
   def get_info(self, game_state):
     """Get information tensor about the state. For 
-    multi-agent setting, this is and ordered 4-tuple state_tensor, p1_iset_tensor,
-    p2_iset_tensor, public_state_tensor. For single-agent,
+    multi-agent setting, this is and ordered 4-tuple state_tensor, p1_infoset_tensor,
+    p2_infoset_tensor, public_state_tensor. For single-agent,
     this is an ordered 2-tuple state_tensor, observation_tensor"""
     pass
 

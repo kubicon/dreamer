@@ -9,31 +9,28 @@ from typing import Sequence, Tuple
 
   
 
-
-# @chex.dataclass(frozen=True)
-# class PredictionStep():
-#   repr_state: chex.Array
-#   decoded_obs: chex.Array
-#   reward_dist_logit: chex.Array
-#   done_logit: chex.Array
-#   dynamics_state: chex.Array
-
 @chex.dataclass(frozen=True)
 class PredictionStepWithLegal():
-  joint_recurrent_state: chex.Array
-  joint_repr_state: chex.Array
-  joint_deter_state: chex.Array
+  recurrent_state: chex.Array
+  repr_state: chex.Array
+  deter_state: chex.Array
   decoded_obs: chex.Array
   reward_dist_logit: chex.Array
   done_logit: chex.Array
   legal_logit: chex.Array
-  joint_dynamics_state: chex.Array
+  dynamics_state: chex.Array
+  #Latent infoset predictions and decoding
+  joint_latent_infoset: chex.Array
+  infoset_decoded_obs: chex.Array
+  infoset_decoded_actions: chex.Array
+  infoset_predicted_recurrent: chex.Array
+  infoset_predicted_deter: chex.Array
 
 
 @chex.dataclass(frozen=True)
 class ActorCriticTimeStep():
   
-  obs: chex.Array = () # [..., Player, iset_dim] for IIGs 
+  obs: chex.Array = () # [..., Player, infoset_dim] for IIGs 
                       #or [..., Player, num_classes * num_categoricals + hidden_state_size otherwise + num_players]
                       # For each player, a one hot encoding of the player index is also appended
                       # to the model state. Otherwise it would be impossible to return distinct policies 
@@ -49,7 +46,7 @@ class ActorCriticTimeStep():
 @chex.dataclass(frozen=True)
 class TimeStep():
   
-  obs: chex.Array = () # [..., Player, iset_dim] for multi agent or [..., obs_dim] for single_agent
+  obs: chex.Array = () # [..., Player, infoset_dim] for multi agent or [..., obs_dim] for single_agent
   legal: chex.Array = () # [..., Player, A] for multi agent or [..., A] for single_agent
   
   action: chex.Array = () # [..., Player, A] for multi agent or [..., A] for single agent
@@ -131,13 +128,14 @@ class DreamerMAConfig():
   encoded_categories: int # Number of categorical distributions in state
 
 
-  use_original_iset: bool = False
+  use_original_infoset: bool = False
   report_gradnorms: bool = False # Whether to report world model gradient norms
 
   #Weights of the individual loss terms of the world model
   beta_prediction: float = 1
   beta_dynamics: float = 1
   beta_representation: float = 0.1
+  beta_infoset: float = 1.0
 
   free_bits_clip_threshold: float = 1 #Threshold for loss clip in free bits.
   uniform_mix: float = 0.01 # Amount of uniform mixture added to the 
@@ -146,8 +144,11 @@ class DreamerMAConfig():
   bin_range: int = 20 #Number of the exponentially spaced bins for certain predictions such as reward in one direction, bins will be spaced out as symexp([-bin_range, ..., bin_range])
   
   sequential_network_details: tuple[int, int, int] = (256, 256, 1) # Ordered as size of hidden state, number of features for the MLP processing, number of layers in the MLP processing
-  encoder_network_details: tuple[int, int] = (256, 256, 1) #Ordered as observation tokens size, hidden_layer_features, num_hidden_layers
+  encoder_network_details: tuple[int, int, int] = (256, 256, 1) #Ordered as observation tokens size, hidden_layer_features, num_hidden_layers
+  infoset_network_details: tuple[int, int, int] = (256, 256, 1) #Ordered as size of latent infoset, hidden_layer_features, num_hidden_layers
   # Ordered as (hidden_layer_features, num_hidden_layers)
+  infoset_decoder_details: tuple[int, int] = (256, 1)
+  infoset_predictor_details: tuple[int, int] = (256, 1)
   decoder_network_details: tuple[int, int] = (256, 1)
   observer_network_details: tuple[int, int] = (256, 1)
   dynamics_network_details: tuple[int, int] = (256, 1)
@@ -333,7 +334,7 @@ def get_value_from_bins(dist_logits: chex.Array, bin_range: int):
   v = symexp(v)
   return v
 
-def wm_timestep_to_timestep(wm_timestep: TimeStep, wm_prediction_step: PredictionStepWithLegal, use_iset: bool) ->ActorCriticTimeStep:
+def wm_timestep_to_timestep(wm_timestep: TimeStep, wm_prediction_step: PredictionStepWithLegal, use_infoset: bool) ->ActorCriticTimeStep:
     #Do not forget that the world model timestep rewards and terminal
     # are w.r.t. the current state. We want
     # reward for playing an action in the current state, not for getting to it
@@ -346,17 +347,13 @@ def wm_timestep_to_timestep(wm_timestep: TimeStep, wm_prediction_step: Predictio
     reward = wm_timestep.reward[1:]
     valid = jnp.logical_and(~wm_timestep.terminal[:-1], wm_timestep.valid[:-1])
     
-    #if we shouldnt use infosets we replace obs
-    # with the predicted model states
-    if use_iset:
+    #if use_infoset is specified, we assume that
+    # obs is our infoset and that we want to use it
+    # Otherwise, use the latent_infoset
+    if use_infoset:
       obs = wm_timestep.obs[:-1]
     else:
-      #These are sampled from the encoder produced stochastic states
-      # once again, do not take the last one since it will be terminal
-      deters = wm_prediction_step.joint_deter_state[:-1]
-      flat_deters = jnp.reshape(deters, (*deters.shape[:-2], -1))  
-      model_states = jnp.concatenate([wm_prediction_step.joint_recurrent_state[:-1], flat_deters], axis=-1)
-      obs = model_states
+      obs = wm_prediction_step.joint_latent_infoset[:-1]
     ac_timestep = ActorCriticTimeStep(obs = obs,
                                       legal=legal,
                                       action=action,
@@ -370,7 +367,7 @@ def get_reference_policy(obs: chex.Array, legal_actions: chex.Array):
   TODO: This is just for the basic testing, change this function"""
   return legal_actions / legal_actions.sum(axis=-1, keepdims=True)
 
-def uniform_policy(iset: chex.Array, legal_actions: chex.Array):
+def uniform_policy(infoset: chex.Array, legal_actions: chex.Array):
   return legal_actions / legal_actions.sum(axis=-1, keepdims=True)
 
 

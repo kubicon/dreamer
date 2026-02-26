@@ -26,7 +26,7 @@ loaded_parser = experiment_parsers.add_parser(name="loaded", help="Evaluate best
 loaded_parser.add_argument("--metric", type=str, default="nash_conv", choices=("nash_conv", "expected_util", "env_return"), help="Type of metric to plot. Either NashConv, expected_utility, or smoothed environment returns during training.")
 
 nash_parser = experiment_parsers.add_parser(name="nash", help="Evaluate expected values of the model, best response values against it and also of a saved reference nash equilibrium strategy.")
-nash_parser.add_argument("--nash_strategy_path", type=str, default="experiments/goofspiel_nash.pkl", help="Path to the saved nash strategy in pickle format. Must be formatted as a tuple of behavioral strategies per tree depth and iset map per tree_depth.")
+nash_parser.add_argument("--nash_strategy_path", type=str, default="experiments/goofspiel_nash.pkl", help="Path to the saved nash strategy in pickle format. Must be formatted as a tuple of behavioral strategies per tree depth and infoset map per tree_depth.")
 
    
 def parse_env_returns(model_dir):
@@ -83,6 +83,9 @@ def get_metrics_from_dir(model_dir, args):
         step = int(filename.split("_")[-1].split(".")[0])
 
         model_path = os.path.join(model_dir, filename)
+
+        if args.restore_step >=0 and (not step == args.restore_step):
+            continue
         
         #try:
         if first:
@@ -90,7 +93,7 @@ def get_metrics_from_dir(model_dir, args):
             assert isinstance(model, DreamerMA), f"Expected DreamerMA, got {model.__class__}"
             
             # Initialize Game
-            if not model.optimizer.model.use_real_iset:
+            if not model.optimizer.model.use_real_infoset:
                 game = DreamerModelGame(model)
             else:
                 game = model.game
@@ -101,7 +104,7 @@ def get_metrics_from_dir(model_dir, args):
             model.actor_critic.learner_steps = temp_model.actor_critic.learner_steps
             model.learner_steps = temp_model.learner_steps
             
-            if not model.optimizer.model.use_real_iset:
+            if not model.optimizer.model.use_real_infoset:
                 game = DreamerModelGame(model)
 
         # Calculate Metric
@@ -311,15 +314,15 @@ def test_nash(args, saved_nash_path: str):
   assert isinstance(model, DreamerMA), f"The loaded model should be an instance of DreamerMA. Instead got {model.__class__}"
   
   game = DreamerModelGame(model) if not model.optimizer.model.is_iig else  model.game
-  p1_nash_val, p2_nash_val, nash_iset_map, nash_behaviorals = load_model(nash_path)
+  p1_nash_val, p2_nash_val, nash_infoset_map, nash_behaviorals = load_model(nash_path)
   print(f"Loaded nash policies of game with game value {p1_nash_val} (from player 1 perspective)")
   model_map, model_behaviorals = extract_model_policy(model, game)
-  found_p1_nash, found_p2_nash = policy_expected_value(game, (nash_iset_map, nash_behaviorals), eps=1e-5)
+  found_p1_nash, found_p2_nash = policy_expected_value(game, (nash_infoset_map, nash_behaviorals), eps=1e-5)
   found_p1_nash, found_p2_nash = args.scale_factor * found_p1_nash, args.scale_factor * found_p2_nash
   print(f"Found nash values: {found_p1_nash} {found_p2_nash}")
   assert np.isclose(found_p1_nash, p1_nash_val, atol=1e-5), f"Found nash value {found_p1_nash} and saved nash value {p1_nash_val} for player 1 differ!"
   assert np.isclose(found_p1_nash, p1_nash_val, atol=1e-5), f"Found nash value {found_p2_nash} and saved nash value {p2_nash_val} for player 2 differ!"
-  p2_br_val, p1_br_val, p1_br, p2_br = model_best_response(model, game, (nash_iset_map, nash_behaviorals))
+  p2_br_val, p1_br_val, p1_br, p2_br = model_best_response(model, game, (nash_infoset_map, nash_behaviorals))
   print(f"Found nash exploitabilities:")
   print(f"P2 best response value against p1: {p2_br_val}")
   print(f"P1 best response value against p2 {p1_br_val}")
@@ -330,7 +333,7 @@ def test_nash(args, saved_nash_path: str):
   p1_br_val, p2_br_val = args.scale_factor * p1_br_val, args.scale_factor * p2_br_val
   print(f"P2 best response value against p1: {p2_br_val}")
   print(f"P1 best response value against p2 {p1_br_val}")
-  #compare_policies(model.world_model.game, (model_map, model_behaviorals), (nash_iset_map, nash_behaviorals))
+  #compare_policies(model.world_model.game, (model_map, model_behaviorals), (nash_infoset_map, nash_behaviorals))
         
   
 

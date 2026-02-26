@@ -5,6 +5,7 @@ from functools import partial
 import numpy as np
 
 import psutil
+import resource
 import time
 import os
 
@@ -26,6 +27,11 @@ def get_process_memory():
     process = psutil.Process(os.getpid())
     return process.memory_info().rss
 
+def get_peak_memory():
+    # resource.getrusage returns ru_maxrss in kilobytes on Linux systems. 
+    # We multiply by 1024 to convert it to bytes to match psutil.
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+
 
 def track(func):
     def wrapper(*args, **kwargs):
@@ -34,9 +40,10 @@ def track(func):
         result = func(*args, **kwargs)
         elapsed_time = elapsed_since(start)
         mem_after = get_process_memory()
-        print("{}: memory before: {:,}, after: {:,}, consumed: {:,}; exec time: {}".format(
+        peak_memory = get_peak_memory()
+        print("{}: memory before: {:,}, after: {:,}, consumed: {:,}, peak: {:,}; exec time: {}".format(
             func.__name__,
-            mem_before, mem_after, mem_after - mem_before,
+            mem_before, mem_after, mem_after - mem_before, peak_memory,
             elapsed_time))
         return result
     return wrapper
@@ -46,55 +53,48 @@ def track(func):
 #################################################################
 
 
-def get_next_outcomes(model: DreamerMA, joint_stoch_state: chex.Array,
-                      joint_recurrent_state: chex.Array, obs: chex.Array| np.ndarray,
+def get_next_outcomes(model: DreamerMA, stoch_state: chex.Array,
+                      recurrent_state: chex.Array, obs: chex.Array| np.ndarray,
                       threshold: float = 0.05) ->list:
   """Takes all possible stochastic state outcomes and then
   clusters them to the corresponding next outcome, based on 
-  l2 distance between decoder and real iset"""
+  l2 distance between decoder and real infoset"""
   
 
 
   obs = np.asarray(obs)
   num_next_obs = obs.shape[0]
-  num_players ,num_classes, num_categories = joint_stoch_state.shape
+  num_classes, num_categories = stoch_state.shape
   next_deters = [[] for _ in range(num_next_obs)]
   probs = [[] for _ in range(num_next_obs)]
-  total_classes = num_players * num_classes
-
-  #Flatten the stoch state over the players
-  # to straightforwadly perform the stoch_state
-  stoch_state = joint_stoch_state.reshape((-1, num_categories))
   deter_states = (stoch_state >= threshold).astype(int)
   class_indices, category_indices = np.nonzero(deter_states)
   per_class_valids = []
-  for i in range(total_classes):
+  for i in range(num_classes):
     single_class_indices = category_indices[class_indices == i]
     per_class_valids.append(single_class_indices)
 
   combinations = cartesian_product(*per_class_valids)
   for comb in combinations:
-    prob = np.prod(stoch_state[np.arange(total_classes), comb])
+    prob = np.prod(stoch_state[np.arange(num_classes), comb])
     sampled_deter = jax.nn.one_hot(comb, stoch_state.shape[-1])
-    #Reshape back to be per player deter state
-    joint_deter = sampled_deter.reshape((num_players, num_classes, num_categories))
-    next_closest_idx = get_closest_next_ma(model, joint_recurrent_state, joint_deter, obs)
-    next_deters[next_closest_idx].append(joint_deter)
+    next_closest_idx = get_closest_next_ma(model, recurrent_state, sampled_deter, obs)
+    next_deters[next_closest_idx].append(sampled_deter)
     probs[next_closest_idx].append(prob)
     
   return next_deters, probs
 
 
-def get_closest_next_ma(model: DreamerMA, joint_recurrent_state, next_joint_deter, next_isets: np.ndarray):
+def get_closest_next_ma(model: DreamerMA, recurrent_state, next_deter, next_infosets: np.ndarray):
   """Find the index of the closest next state
   this deterministic state corresponds to. With
-  respect to distance between real isets of both players
-  and decoded isets of both players."""
-  if next_isets.ndim == 2 or next_isets.shape[0] == 1:
+  respect to distance between real infosets of both players
+  and decoded infosets of both players."""
+  if next_infosets.ndim == 2 or next_infosets.shape[0] == 1:
     return 0
   ma_rssm = model.optimizer.model
-  decoded_obs = ma_rssm.get_decoder_all(joint_recurrent_state, next_joint_deter)
-  next_dists = np.sum((decoded_obs[None, ...] - next_isets) ** 2, axis=(-1, -2))
+  decoded_obs = ma_rssm.get_decoder(recurrent_state, next_deter)
+  next_dists = np.sum((decoded_obs[None, ...] - next_infosets) ** 2, axis=(-1, -2))
   next_closest  = np.argmin(next_dists)
   return next_closest
 
@@ -130,48 +130,48 @@ def stringify(x)->str :
    return np.array2string(x)
 
 
-def isets_close(iset1, iset2, tolerance=0.05):
-   return np.sum((iset1 - iset2) ** 2) <= tolerance
+def infosets_close(infoset1, infoset2, tolerance=0.05):
+   return np.sum((infoset1 - infoset2) ** 2) <= tolerance
 
-def find_closest_index(iset_map: np.ndarray, ref_iset: np.ndarray, tolerance=0.05):
-  """Finds the iset index in the given iset map
+def find_closest_index(infoset_map: np.ndarray, ref_infoset: np.ndarray, tolerance=0.05):
+  """Finds the infoset index in the given infoset map
   based on closeness and returns it, or -1
-  if no iset close enough within tolerance is found """
-  #Edge case for an empty iset map
-  if iset_map.shape == (0,):
+  if no infoset close enough within tolerance is found """
+  #Edge case for an empty infoset map
+  if infoset_map.shape == (0,):
     return -1
-  iset_distance = np.sum((iset_map - ref_iset[None, ...]) ** 2, axis=-1)
-  valid_isets = iset_distance <= tolerance
-  # No valid iset was found
-  if np.sum(valid_isets) == 0:
+  infoset_distance = np.sum((infoset_map - ref_infoset[None, ...]) ** 2, axis=-1)
+  valid_infosets = infoset_distance <= tolerance
+  # No valid infoset was found
+  if np.sum(valid_infosets) == 0:
     return -1
   # else return the best fitting candidate
-  return np.argmin(iset_distance)
+  return np.argmin(infoset_distance)
 
-def create_iset_map(curr_iset, amount_actions, curr_legal):
-    """Creates an map where at index i there is an iset corresponding to the index.
-    Also returns per iset legal actions like this, per history player iset indices and per
+def create_infoset_map(curr_infoset, amount_actions, curr_legal):
+    """Creates an map where at index i there is an infoset corresponding to the index.
+    Also returns per infoset legal actions like this, per history player infoset indices and per
     history player action indices (actions are differentiated by which infoset they are taken)"""
-    isets = [[], []]
-    iset_map = [[], []]
-    iset_legal = [[], []]
-    for pl in range(curr_iset.shape[0]):
-      first_iset_id = len(iset_map[pl])
-      for i in range(curr_iset.shape[1]): 
+    infosets = [[], []]
+    infoset_map = [[], []]
+    infoset_legal = [[], []]
+    for pl in range(curr_infoset.shape[0]):
+      first_infoset_id = len(infoset_map[pl])
+      for i in range(curr_infoset.shape[1]): 
         curr_index = -1
-        for j in range(first_iset_id, len(iset_map[pl])):
-          if isets_close(iset_map[pl][j], curr_iset[pl, i]):
+        for j in range(first_infoset_id, len(infoset_map[pl])):
+          if infosets_close(infoset_map[pl][j], curr_infoset[pl, i]):
             curr_index = j
             break
         if curr_index < 0:
-          curr_index = len(iset_map[pl])
-          iset_map[pl].append(curr_iset[pl, i])
-          iset_legal[pl].append(curr_legal[pl, i])
-        isets[pl].append(curr_index)
+          curr_index = len(infoset_map[pl])
+          infoset_map[pl].append(curr_infoset[pl, i])
+          infoset_legal[pl].append(curr_legal[pl, i])
+        infosets[pl].append(curr_index)
         
-    isets = np.array(isets)
-    actions = isets[..., None] * amount_actions + np.arange(amount_actions)[None, None, ...] 
-    iset_map = [np.array(i) for i in iset_map]
-    iset_legal = [np.array(i) for i in iset_legal]
-    return iset_map, iset_legal, isets, actions
+    infosets = np.array(infosets)
+    actions = infosets[..., None] * amount_actions + np.arange(amount_actions)[None, None, ...] 
+    infoset_map = [np.array(i) for i in infoset_map]
+    infoset_legal = [np.array(i) for i in infoset_legal]
+    return infoset_map, infoset_legal, infosets, actions
 

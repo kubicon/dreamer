@@ -225,16 +225,16 @@ class JaxLeduc(JaxGame):
 
     p1_player = jax.nn.one_hot(0, 2)
     
-    p1_iset_tensor = jnp.concatenate([p1_player.ravel(), private_cards_oh[0], public_state_tensor], axis=0)
-    p1_iset_tensor = jnp.where(game_state.is_chance, jnp.zeros_like(p1_iset_tensor), p1_iset_tensor)
-    p2_iset_tensor = jnp.concatenate([1 - p1_player.ravel(), private_cards_oh[1], public_state_tensor], axis=0)
+    p1_infoset_tensor = jnp.concatenate([p1_player.ravel(), private_cards_oh[0], public_state_tensor], axis=0)
+    p1_infoset_tensor = jnp.where(game_state.is_chance, jnp.zeros_like(p1_infoset_tensor), p1_infoset_tensor)
+    p2_infoset_tensor = jnp.concatenate([1 - p1_player.ravel(), private_cards_oh[1], public_state_tensor], axis=0)
     
-    p2_iset_tensor = jnp.where(game_state.is_chance, jnp.zeros_like(p2_iset_tensor), p2_iset_tensor)
+    p2_infoset_tensor = jnp.where(game_state.is_chance, jnp.zeros_like(p2_infoset_tensor), p2_infoset_tensor)
 
     state_tensor = jnp.concatenate([private_cards_oh.ravel(), public_state_tensor], axis=0)
     state_tensor = jnp.where(game_state.is_chance, jnp.zeros_like(state_tensor), state_tensor)
 
-    return state_tensor, p1_iset_tensor, p2_iset_tensor, public_state_tensor
+    return state_tensor, p1_infoset_tensor, p2_infoset_tensor, public_state_tensor
 
   
   @functools.partial(jax.jit, static_argnums=(0))

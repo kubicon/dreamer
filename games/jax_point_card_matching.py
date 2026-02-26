@@ -49,9 +49,9 @@ class PointCardMatching(JaxGame):
     #starting at 0 points hence the + 1
     points_oh = jax.nn.one_hot(state.points, self.max_points + 1)
     state_tensor = jnp.concatenate([state.played_cards.ravel(), state.point_card.ravel(), points_oh.ravel()])
-    p1_iset = jnp.concatenate([jax.nn.one_hot(0, 2), state_tensor], axis=0)
-    p2_iset = jnp.concatenate([jax.nn.one_hot(1, 2), state_tensor], axis=0)
-    return state_tensor, p1_iset, p2_iset, state_tensor
+    p1_infoset = jnp.concatenate([jax.nn.one_hot(0, 2), state_tensor], axis=0)
+    p2_infoset = jnp.concatenate([jax.nn.one_hot(1, 2), state_tensor], axis=0)
+    return state_tensor, p1_infoset, p2_infoset, state_tensor
   
   def num_distinct_actions(self):
     return self.num_cards
@@ -174,9 +174,9 @@ class PointCardMatchingStochastic(JaxGame):
 
     #Return invalid data on chance turn
     state_tensor = jnp.where(state.is_chance, jnp.zeros_like(state_tensor), state_tensor)
-    p1_iset = jnp.concatenate([jax.nn.one_hot(0, 2), state_tensor], axis=0)
-    p2_iset = jnp.concatenate([jax.nn.one_hot(1, 2), state_tensor], axis=0)
-    return state_tensor, p1_iset, p2_iset, state_tensor
+    p1_infoset = jnp.concatenate([jax.nn.one_hot(0, 2), state_tensor], axis=0)
+    p2_infoset = jnp.concatenate([jax.nn.one_hot(1, 2), state_tensor], axis=0)
+    return state_tensor, p1_infoset, p2_infoset, state_tensor
   
   def num_distinct_actions(self):
     return self.num_cards

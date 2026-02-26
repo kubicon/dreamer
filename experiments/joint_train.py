@@ -23,7 +23,7 @@ def train(args, game: JaxGame):
       batch_size=args.batch_size,
       report_gradnorms = args.report_gradnorms,
 
-      use_original_iset = args.use_original_iset,
+      use_original_infoset = args.use_original_infoset,
 
       #Weights of the individual loss terms of the world model
       beta_prediction = args.beta_prediction,
@@ -45,7 +45,10 @@ def train(args, game: JaxGame):
       dynamics_network_details = (args.dynamics_hidden_features, args.dynamics_hidden_layers),
       reward_predictor_network_details = (args.reward_predictor_hidden_features, args.reward_predictor_hidden_layers),
       done_predictor_network_details = (args.done_predictor_hidden_features, args.done_predictor_hidden_layers),
-      legal_actions_network_details = (args.legal_predictor_hidden_features, args.legal_predictor_hidden_layers)
+      legal_actions_network_details = (args.legal_predictor_hidden_features, args.legal_predictor_hidden_layers),
+      infoset_network_details = (args.latent_infoset_size, args.infoset_network_hidden_features, args.infoset_network_hidden_layers),
+      infoset_decoder_details = (args.infoset_decoder_hidden_features, args.infoset_decoder_hidden_layers),
+      infoset_predictor_details = (args.infoset_predictor_hidden_features, args.infoset_predictor_hidden_layers)
     )
     
   buffer_config = BufferConfig(buffer_size = args.buffer_size,

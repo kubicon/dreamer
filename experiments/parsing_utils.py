@@ -44,8 +44,9 @@ def add_wm_arguments(parser: ArgumentParser) ->ArgumentParser:
 
   parser.add_argument(f"--batch_size", type=int, default=32, help="Batch size for training")
   
-  parser.add_argument(f"--use_original_iset", action="store_true", help="A debug flag that forces training actor-critic on original game infosets even outside IIGs.")
-  
+  parser.add_argument(f"--use_original_infoset", action="store_true", help="A debug flag that forces training actor-critic on original game infosets even outside IIGs.")
+  parser.add_argument(f"--latent_infoset_size", type=int, default=-1, help="Size of the latent infoset vector. If < 0, will make the latent infoset have the same size as real infoset")
+
   #Replay buffer parameters
   parser.add_argument("--buffer_size", type=int, default=32, help="Size of the replay buffer.")
   parser.add_argument("--replay_ratio", type=int, default=-1, help="The replay ratio, which defines the amount of online steps per minibatch. Respectively, the ratio is replay_ratio / (batch_size * trajectory_len). If -1, only online trajectories are sampled")
@@ -70,6 +71,9 @@ def add_wm_arguments(parser: ArgumentParser) ->ArgumentParser:
   parser.add_argument("--reward_predictor_hidden_features", type=int, default=256, help="Size of the hidden layer in the reward predictor network")
   parser.add_argument("--done_predictor_hidden_features", type=int, default=256, help="Size of the hidden layer in the terminal predictor network")
   parser.add_argument("--legal_predictor_hidden_features", type=int, default=256, help="Size of the hidden layer in the legal actions predictor network")
+  parser.add_argument("--infoset_network_hidden_features", type=int, default=256, help="Size of the hidden layer in the infoset network, the RNN creating latent infoset from action-observation history.")
+  parser.add_argument("--infoset_decoder_hidden_features", type=int, default=256, help="Size of the hidden layer in the infoset decoder network, the one that real observation and previous action from latent infoset")
+  parser.add_argument("--infoset_predictor_hidden_features", type=int, default=256, help="Size of the hidden layer in the infoset predictor network,the one that predicts the model state from both players latent infosets.")
   
   parser.add_argument("--sequential_mlp_layers", type=int, default=1, help="Number of hidden layers for the sequential network MLP")
   parser.add_argument("--encoder_hidden_layers", type=int, default=1, help="Number of hidden layers in the encoder network")
@@ -79,6 +83,9 @@ def add_wm_arguments(parser: ArgumentParser) ->ArgumentParser:
   parser.add_argument("--reward_predictor_hidden_layers", type=int, default=1, help="Number of hidden layers in the reward predictor network")
   parser.add_argument("--done_predictor_hidden_layers", type=int, default=1, help="Number of hidden layers in the terminal predictor network")
   parser.add_argument("--legal_predictor_hidden_layers", type=int, default=1, help="Number of hidden layers in the legal actions predictor network")
+  parser.add_argument("--infoset_network_hidden_layers", type=int, default=1, help="Number of hidden layers in the infoset network, the RNN creating latent infoset from action-observation history.")
+  parser.add_argument("--infoset_decoder_hidden_layers", type=int, default=1, help="Number of hidden layers in the infoset decoder network, the one that real observation and previous action from latent infoset")
+  parser.add_argument("--infoset_predictor_hidden_layers", type=int, default=1, help="Number of hidden layers in the infoset predictor network,the one that predicts the model state from both players latent infosets.")
 
   return parser
 
