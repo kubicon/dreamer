@@ -84,23 +84,20 @@ class RNaDConfig:
                           # Used only for joint training.
   
   #Ordered as hidden layer size, num hidden layers
-  rnad_network_details: Tuple[int, int] = (256, 1)
+  actor_network_details: Tuple[int, int] = (256, 1)
+  critic_network_details: Tuple[int, int] = (256, 1)
   
   entropy_schedule_repeats: Sequence[int] = (1,)
   entropy_schedule_size: Sequence[int] = (1000,)
 
   eta: float = 0.2 #Regularization strenght
-  vtrace_eta: float = 0.2 #Strenght of the additional KL-regularization in V-trace
 
   #V-trace parameters
   rho_vtrace: float = 1.0 # Clipping parameter. Affects to which policy estimate V-trace converges. Inf means convergence to the estimate for the learned policy
   c_vtrace: float = 1.0 # Clipping parameter
   gamma_vtrace: float = 1.0 # Discount factor
   lambda_vtrace: float = 1.0 #Same as TD-learning lambda
-
-  upper_percentile: float = 95
-  lower_percentile: float = 5 #Percentiles for the return normalization range
-  range_ema_coeff: float = 0.99 # Coeeficient for the EMA update of retun normalization range
+  
   num_last: int = -1 #How many last timesteps to take from each trajectory for the imagination unroll. Take all of them if -1
 
   #NeuRD parameters

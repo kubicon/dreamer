@@ -71,13 +71,13 @@ def get_bin_log_prob(dist_logits: chex.Array, bins: chex.Array,  value: chex.Arr
   chex.assert_equal_shape_prefix([dist_logits, value], -1) # All dimension except the last should match
   #[Trajectory, Batch, 2 * bin_range + 1]
   val_two_hot = two_hot_encode(bins, value, use_symlog=use_symlog)
-  return val_two_hot * jax.nn.log_softmax(dist_logits)
-
+  return jnp.sum(val_two_hot * jax.nn.log_softmax(dist_logits), axis=-1, keepdims=True)
+1
 def get_categorical_prob(dist_logits: chex.Array, oh_target: chex.Array):
   """Gets the probability of the one-hot encoded target under the categorical
   distribution parametrized by dist_logits as oh_target * logsoftmax(dist_logits)"""
   chex.assert_equal_shape((dist_logits, oh_target))
-  return oh_target * jax.nn.log_softmax(dist_logits)
+  return jnp.sum(oh_target * jax.nn.log_softmax(dist_logits), axis=-1, keepdims=True)
    
 
 def two_hot_encode(bins: chex.Array, value:chex.Array, use_symlog= True) -> chex.Array:

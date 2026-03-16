@@ -49,11 +49,8 @@ class MARSSM(nnx.Module):
     self.encoded_categories = wm_config.encoded_categories
     if self.use_real_infoset:
       self.infoset_size = game.information_state_tensor_shape()
-      assert game.information_state_tensor_shape() == game.observation_tensor_shape(), "Specification of use_real_infoset is only sound when the environment provides infoset in place of observation!"
-      print(f"Using original game infosets of shape {self.infoset_size}")
     else:
       self.infoset_size = latent_infoset_size
-      print(f"Using latent infosets of shape {self.infoset_size}")
     self.observation_size = game.observation_tensor_shape()
     self.sampling_epsilon = ac_config.sampling_epsilon
     self.legal_threshold = ac_config.legal_threshold
@@ -148,27 +145,18 @@ class MARSSM(nnx.Module):
                                             rngs)
     self.network_names.extend(['infoset_network', 'infoset_decoder', 'infoset_predictor'])
 
-    if self.use_rnad:
-      self.actor_critic = RNaDNetwork(self.infoset_size,
-                                      self.num_actions,
-                                      ac_config.bin_range,
-                                      ac_config.rnad_network_details[0],
-                                      ac_config.rnad_network_details[1],
-                                      rngs)
-      self.network_names.append('actor_critic')
-    else:
-      self.actor = ActorNetwork(self.infoset_size,
-                                self.num_actions,
-                                ac_config.actor_network_details[0], 
-                                ac_config.actor_network_details[1],
+    self.actor = ActorNetwork(self.infoset_size,
+                              self.num_actions,
+                              ac_config.actor_network_details[0], 
+                              ac_config.actor_network_details[1],
+                              rngs)
+    self.critic = CriticNetwork(self.infoset_size * game.num_players(),
+                                ac_config.bin_range,
+                                ac_config.critic_network_details[0],
+                                ac_config.critic_network_details[1],
                                 rngs)
-      self.critic = CriticNetwork(self.infoset_size,
-                                  ac_config.bin_range,
-                                  ac_config.critic_network_details[0],
-                                  ac_config.critic_network_details[1],
-                                  rngs)
-      self.network_names.append('actor')
-      self.network_names.append('critic')
+    self.network_names.append('actor')
+    self.network_names.append('critic')
       
   def default_ac_timestep(self):
     obs = jnp.zeros((1, self.infoset_size), dtype=f32)
@@ -219,11 +207,6 @@ class MARSSM(nnx.Module):
     def final_bind(*args):
       return f(state, args)
     return final_bind
-  
-  def policy_net(self) ->nnx.Module:
-    if self.use_rnad:
-      return self.actor_critic
-    return self.actor
   
 
   @nnx.jit
@@ -331,8 +314,6 @@ class MARSSM(nnx.Module):
   
   @nnx.jit
   def get_policy(self, obs, legal) ->chex.Array:
-    if self.use_rnad:
-      return MARSSM.call_net(self.actor_critic, obs, legal)[0]
     return MARSSM.call_net(self.actor, obs, legal)
   
   
@@ -342,13 +323,8 @@ class MARSSM(nnx.Module):
     return self.get_policy_both_no_jit(joint_obs, joint_legal)
   
   def get_policy_both_no_jit(self, joint_obs, joint_legal) ->chex.Array:
-    
-    if self.use_rnad:
-      net = self.actor_critic
-    else:
-      net = self.actor
     vectorized_actor = nnx.vmap(MARSSM.call_net, in_axes=(None, 0, 0), out_axes=0)
-    return vectorized_actor(net, joint_obs, joint_legal)[0]
+    return vectorized_actor(self.actor, joint_obs, joint_legal)[0]
   
   @nnx.jit
   def imagine_trajectories(self, key, starting_points: PredictionStepWithLegal) ->ActorCriticTimeStep:

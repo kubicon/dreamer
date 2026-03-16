@@ -110,6 +110,7 @@ def get_metrics_from_dir(model_dir, args):
         # Calculate Metric
         if args.metric == "nash_conv":
             metric = nash_conv(model, game)
+            #jax.debug.breakpoint()
         else:
             model_map_and_behaviorals = extract_model_policy(model, game)
             metric, _ = policy_expected_value(game, model_map_and_behaviorals)

@@ -61,40 +61,34 @@ class DreamerMA():
     self.use_real_infoset = ma_rssm.use_real_infoset
     assert self.game.num_players() > 1, f"This implementation of Dreamer assumes a game with at least 2 players not {self.game.num_players()}"
     self.recurrent_state_size = ma_rssm.rec_state_size
-    self.use_rnad = ma_rssm.use_rnad
     #Vanilla SGD coupled with the gradients
     # we compute manually in actor critic will handle
     # the EMA updates for us.
     target_tx = optax.sgd(self.ac_config.target_network_update)
-    if self.use_rnad:
-      target_optimizer = nnx.Optimizer(model= RNaDNetwork(self.infoset_size,
-                                                          self.action_dimension,
-                                                          self.ac_config.bin_range,
-                                                          self.ac_config.rnad_network_details[0],
-                                                          self.ac_config.rnad_network_details[1],
-                                                          rngs=rngs
-                                                          ), tx=target_tx)
+    if ma_rssm.use_rnad:
       ctor = RNaDDreamer
-      self.network_keys = ma_rssm.network_names[:-1]
     else:
-      target_optimizer = nnx.Optimizer(model=CriticNetwork(self.infoset_size,
+      ctor = DreamerActorCritic
+    target_optimizer = nnx.Optimizer(model=CriticNetwork(self.infoset_size * self.game.num_players(),
                                                            self.ac_config.bin_range,
                                                            self.ac_config.critic_network_details[0],
                                                            self.ac_config.critic_network_details[1],
                                                            rngs=rngs),
                                                            tx = target_tx)
-      ctor = DreamerActorCritic
-      self.network_keys = ma_rssm.network_names[:-2]
+    self.network_keys = ma_rssm.network_names[:-2]
     self.actor_critic = ctor(self.game, self.ac_config, self.optimizer, target_optimizer)
     #self.wm_cached_train = nnx.cached_partial(self.update_world_model, self.optimizer)
-    policy_network = ma_rssm.actor_critic if ma_rssm.use_rnad else ma_rssm.actor
     #Also cache the sampling for the buffer
-    self.buffer.cache_sampling(ma_rssm.seq, ma_rssm.enc, ma_rssm.observer, ma_rssm.infoset_network, policy_network)
+    self.buffer.cache_sampling(ma_rssm.seq, ma_rssm.enc, ma_rssm.observer, ma_rssm.infoset_network, ma_rssm.actor)
     self.grad_norms = {k: 0 for k in self.network_keys} 
     self.metrics = {'dec': 0, 'con': 0, 'leg': 0,  'rew': 0, 'dyn': 0, 'rep': 0}
-    #Add the infoset losses, if we should compute them
-    if not self.use_real_infoset:
+    if self.use_real_infoset:
+      assert self.game.information_state_tensor_shape() == self.game.observation_tensor_shape(), "Specification of use_real_infoset is only sound when the environment provides infoset in place of observation!"
+      print(f"Using original game infosets of shape {self.infoset_size}")
+    else:
+      #Add the infoset losses, if we should compute them
       self.metrics.update({'is_obs_dec' : 0, 'is_act_dec': 0, 'is_pred': 0})
+      print(f"Using latent infosets of shape {self.infoset_size}")
     
   
   def generate_key(self):
@@ -208,36 +202,35 @@ class DreamerMA():
       losses = [dec, con, leg, rew, l_dyn, l_rep]
       mults = [*(self.wm_config.beta_prediction, ) * 4, self.wm_config.beta_dynamics, self.wm_config.beta_representation]
       l_infoset = 0
-      if not self.use_real_infoset:
-        #Update the latent infosets
-        #The action loss predicts the previous action. Which also means we do not
-        # compute it for the first step
-        previous_valid = jnp.roll(timestep.valid, 1, axis=0)
-        previous_non_terminal = ~jnp.roll(timestep.terminal, 1, axis=0)
-        is_first = jnp.arange(timestep.action.shape[0]) == 0
-        action_loss_mask = is_first[..., None] * previous_valid * previous_non_terminal
-        #These are one-hot encoded. We want to maximize the probability
-        # of seeing the previous action, hence making sure the infoset retains information about it
-        infoset_prev_action_loss = -get_categorical_prob(predictions.infoset_decoded_actions, previous_actions)
-        is_act = get_loss_mean_with_mask(infoset_prev_action_loss, action_loss_mask[..., None, None])
-        l_infoset += is_act
-        #Current observation loss, similar intuition as with the previous action
-        #Reduces to MSE
-        is_obs_loss = -get_normal_log_prob(predictions.infoset_decoded_obs, timestep.obs, use_symlog=True)
-        is_obs = get_loss_mean_with_mask(is_obs_loss, timestep.valid[..., None, None])
-        l_infoset += is_obs
-        # The current recurrent state prediction loss. This together
-        # with the current deter state prediction loss serves to force
-        # perfect recall by making sure that the union of infosets
-        # is enough to get the perfect information state.
-        is_rec_loss = -get_normal_log_prob(predictions.infoset_predicted_recurrent, jax.lax.stop_gradient(predictions.recurrent_state), use_symlog=True)
-        is_rec = get_loss_mean_with_mask(is_rec_loss, timestep.valid[..., None])
-        l_infoset += is_rec
-        is_deter_loss = -get_categorical_prob(predictions.infoset_predicted_deter, jax.lax.stop_gradient(predictions.deter_state))
-        is_deter = get_loss_mean_with_mask(is_deter_loss, timestep.valid[..., None, None])
-        l_infoset += is_deter
-        losses.extend([is_act, is_obs, is_rec, is_deter])
-        mults.extend([*(self.wm_config.beta_infoset, ) * 4])
+      #Update the latent infosets
+      #The action loss predicts the previous action. Which also means we do not
+      # compute it for the first step
+      previous_valid = jnp.roll(timestep.valid, 1, axis=0)
+      previous_non_terminal = ~jnp.roll(timestep.terminal, 1, axis=0)
+      is_first = jnp.arange(timestep.action.shape[0]) == 0
+      action_loss_mask = is_first[..., None] * previous_valid * previous_non_terminal
+      #These are one-hot encoded. We want to maximize the probability
+      # of seeing the previous action, hence making sure the infoset retains information about it
+      infoset_prev_action_loss = -get_categorical_prob(predictions.infoset_decoded_actions, previous_actions)
+      is_act = get_loss_mean_with_mask(infoset_prev_action_loss, action_loss_mask[..., None, None])
+      l_infoset += is_act
+      #Current observation loss, similar intuition as with the previous action
+      #Reduces to MSE
+      is_obs_loss = -get_normal_log_prob(predictions.infoset_decoded_obs, timestep.obs, use_symlog=True)
+      is_obs = get_loss_mean_with_mask(is_obs_loss, timestep.valid[..., None, None])
+      l_infoset += is_obs
+      # The current recurrent state prediction loss. This together
+      # with the current deter state prediction loss serves to force
+      # perfect recall by making sure that the union of infosets
+      # is enough to get the perfect information state.
+      is_rec_loss = -get_normal_log_prob(predictions.infoset_predicted_recurrent, jax.lax.stop_gradient(predictions.recurrent_state), use_symlog=True)
+      is_rec = get_loss_mean_with_mask(is_rec_loss, timestep.valid[..., None])
+      l_infoset += is_rec
+      is_deter_loss = -get_categorical_prob(predictions.infoset_predicted_deter, jax.lax.stop_gradient(predictions.deter_state))
+      is_deter = get_loss_mean_with_mask(is_deter_loss, timestep.valid[..., None, None])
+      l_infoset += is_deter
+      losses.extend([is_act, is_obs, is_rec, is_deter])
+      mults.extend([*(self.wm_config.beta_infoset, ) * 4])
 
       wm_keys = self.metrics.keys()
       metrics = {k: v * m for k, v, m in zip(wm_keys, losses, mults)}

@@ -157,7 +157,7 @@ class ReplayBuffer():
     
 
   def cache_sampling(self, recurrent_network: SequenceModel, encoder_network: Encoder,
-                     observer_network: ObservedPredictor, infoset_network: InfosetModel, actor_network: ActorNetwork | RNaDNetwork):
+                     observer_network: ObservedPredictor, infoset_network: InfosetModel, actor_network: ActorNetwork):
     self.cached_sample = nnx.cached_partial(self.sample_batch_trajectories, recurrent_network,
                                             encoder_network, observer_network, infoset_network, actor_network)
     
@@ -235,7 +235,7 @@ class ReplayBuffer():
   def add_batch(self, batch_size: int, sample_key: chex.Array, recurrent_network: SequenceModel| None = None,
                 observer_network: ObservedPredictor | None = None,
                 encoder_network: Encoder | None = None, infoset_network: InfosetModel | None = None,
-                actor_network: ActorNetwork | RNaDNetwork | None =None):
+                actor_network: ActorNetwork| None =None):
     """Sample a batch of trajectories from the environment and add them to the buffer.
     Also returns the trajectories if you want to perform online training on them."""
     if all([net is not None for net in (recurrent_network, encoder_network, observer_network,infoset_network, actor_network)]):
@@ -329,14 +329,14 @@ class ReplayBuffer():
 
 
   @partial(nnx.jit, static_argnums=(0, 6))
-  def sample_batch_trajectories(self, recurrent_network: SequenceModel, encoder_network: Encoder, observer_network: ObservedPredictor, infoset_network: InfosetModel, actor_network: ActorNetwork | RNaDNetwork, batch_size:int, key):
+  def sample_batch_trajectories(self, recurrent_network: SequenceModel, encoder_network: Encoder, observer_network: ObservedPredictor, infoset_network: InfosetModel, actor_network: ActorNetwork, batch_size:int, key):
     batch_keys = jax.random.split(key, batch_size)
     batch_sample_trajectories = nnx.vmap(self.sample_trajectory, in_axes=(None, None, None, None, None, 0), out_axes=(1))
     batch_trajectories = batch_sample_trajectories(recurrent_network, encoder_network, observer_network,infoset_network, actor_network, batch_keys)
     return batch_trajectories
 
   @partial(nnx.jit, static_argnums=0)
-  def sample_trajectory(self, recurrent_network: SequenceModel, encoder_network:Encoder, observer_network: ObservedPredictor, infoset_network: InfosetModel, actor_network:ActorNetwork | RNaDNetwork, key) ->TimeStep:
+  def sample_trajectory(self, recurrent_network: SequenceModel, encoder_network:Encoder, observer_network: ObservedPredictor, infoset_network: InfosetModel, actor_network:ActorNetwork, key) ->TimeStep:
     trajectory_key = jax.random.split(key, self.trajectory_max)
     actions = self.action_dimension
 
@@ -385,14 +385,14 @@ class ReplayBuffer():
     
     vectorized_sample_action = nnx.vmap(choice_wrapper, in_axes=(0, 0), out_axes=0)
 
-    def get_actor_policy(actor_network: ActorNetwork | RNaDNetwork, obs, legal_actions):
+    def get_actor_policy(actor_network: ActorNetwork, obs, legal_actions):
       return actor_network(obs, legal_actions)[0]
     #per player vmap
     vectorized_get_actor = nnx.vmap(get_actor_policy, in_axes=(None, 0, 0), out_axes=0)
 
     @nnx.scan(in_axes=(nnx.Carry, None, None, None, None,None, 0), out_axes=(nnx.Carry, 0))
     def _sample_trajectory(carry: SampleTrajectoryCarry, recurrent_network: SequenceModel, encoder_network:Encoder, observer_network: ObservedPredictor,
-                            infoset_network: InfosetModel, actor_network:ActorNetwork | RNaDNetwork, key) -> tuple[SampleTrajectoryCarry, chex.Array]:
+                            infoset_network: InfosetModel, actor_network:ActorNetwork, key) -> tuple[SampleTrajectoryCarry, chex.Array]:
       
       
       state, p1_infoset, p2_infoset, public_state = self.game.get_info(carry.game_state)

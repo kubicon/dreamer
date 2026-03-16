@@ -44,42 +44,10 @@ class HiddenMLP(nnx.Module):
     
     return forward_hidden(x, self.hidden_layers)
 
-
-class RNaDNetwork(nnx.Module):
-  """The RNaD algorithm network, with policy and value heads.
-  Receive current infoset and legal actions mask and return
-  policy, value, log policy and policy logit.
-  Only the infoset is sent to the network.
-  The value is parametrized as logits for a categorical distribution
-  over the exponentially spaced bins like symexp([-bin_range, bin_range])"""
-
-  def __init__(self, infoset_features, action_features, bin_range, hidden_features, num_layers, rngs:nnx.Rngs):
-    self.init_layer = LinNormRelu(infoset_features, hidden_features, rngs)
-    self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
-    #Initialize to uniform policy logits
-    #self.policy_head = nnx.Linear(hidden_features, action_features, rngs=rngs, kernel_init=nnx.initializers.zeros_init(), bias_init=nnx.initializers.zeros_init())
-    self.policy_head = nnx.Linear(hidden_features, action_features, rngs=rngs)
-    #Initialize the value output layer to all zeros, as per
-    # https://arxiv.org/pdf/2301.04104 page 6
-    self.value_head = nnx.Linear(hidden_features, (2 * bin_range) + 1, rngs=rngs, kernel_init=nnx.initializers.zeros_init(), bias_init=nnx.initializers.zeros_init())
-  
-  def __call__(self, infoset, legal):
-    x = self.init_layer(infoset)
-    x = self.core_mlp(x)
-    logit = self.policy_head(x)
-    v_dist_logits = self.value_head(x)
-    
-    pi = legal_policy(logit, legal)
-    log_pi = legal_log_policy(logit, legal)
-    
-    return pi, v_dist_logits, log_pi, logit
   
 class ActorNetwork(nnx.Module):
   """Actor network used for Reinforce in standard Dreamer.
-  The input to the network is infoset for IIGs, or
-  [sampled_model_state, recurrent_state] for PIGs or POMPDPs.
-  Thus, input features are either the dimension of infoset
-  or (num_classes * num_categoricals) + recurrent_state_size"""
+  The input to the network is latent or real infoset."""
   def __init__(self, input_features, action_features, hidden_features, num_layers, rngs:nnx.Rngs):
     self.init_layer = LinNormRelu(input_features, hidden_features, rngs)
     self.core_mlp = HiddenMLP(hidden_features, num_layers, rngs)
@@ -98,11 +66,9 @@ class ActorNetwork(nnx.Module):
     return pi, log_pi, logit
   
 class CriticNetwork(nnx.Module):
-  """Critic network used in standard Dreamer.
-  The input to the network is infoset for IIGs, or
-  [sampled_model_state, recurrent_state] for PIGs or POMPDPs.
-  Thus, input features are either the dimension of infoset
-  or (num_classes * num_categoricals) + recurrent_state_size
+  """Critic network of the over the history value function.
+  The input to the network is joint_latent_infoset.
+  Thus, input features are  2 * latent_infoset_size.
   Return
   the logits of categorical distribution of value of the 
   current infoset/state, that is defined over the 
@@ -204,7 +170,7 @@ class InfosetModel(nnx.Module):
 
 class InfosetDecoder(nnx.Module):
   """Receive the latent infoset produced by InfosetModel and return
-  reconstructions of the real observation and real action for that player."""
+  reconstructions of the real observation and real previous action for that player."""
   def __init__(self, observation_features, action_features, infoset_dim,
                hidden_features, num_layers, rngs: nnx.Rngs) -> None:
     self.init_layer = LinNormRelu(infoset_dim, hidden_features, rngs)

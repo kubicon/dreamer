@@ -4,12 +4,7 @@ from argparse import ArgumentParser
 def add_actor_critic_arguments(parser: ArgumentParser) -> ArgumentParser:
   """Adds actor-critic required parameters to parser."""
   
-  parser.add_argument(f"--target_network_update", type=float, default=1e-3, help="1 - EMA coefficient for target network update")
-
-
-  parser.add_argument(f"--beta_imagination", type=float, default=1.0, help="Coefficient for loss on Dreamer imagined trajectories")
-  parser.add_argument(f"--beta_real", type=float, default=0.3, help="Coefficient for loss on real environment trajectories")
-
+  
   parser.add_argument(f"--eta", type=float, default=3e-4, help="Coefficient for entropy exploration bonus for Reinforce")
   parser.add_argument(f"--gamma", type=float, default=0.997, help="Discount factor for TD-learning")
   parser.add_argument(f"--td_lambda", type=float, default=0.95, help="Lambda parameter for TD-learning")
@@ -20,16 +15,6 @@ def add_actor_critic_arguments(parser: ArgumentParser) -> ArgumentParser:
   parser.add_argument("--range_ema_coeff", type=float, default=0.99, help="Coefficient for the EMA update of return normalization range")
   parser.add_argument("--num_last", type=int, default=-1, help="How many steps from the end of the trajectory to take as starting points for imagination. If <= 0, take the entire trajectory.")
 
-
-  parser.add_argument("--state_sample_threshold", type=float, default=0.05, help="Threshold when sampling states. Outcomes below this threshold are ignored.")
-  parser.add_argument("--terminal_threshold", type=float, default=0.5, help="Threshold when to consider the state terminal.")
-  parser.add_argument("--legal_threshold", type=float, default=0.5, help="Threshold for considering actions legal.")
-  parser.add_argument(f"--ac_bin_range", type=int, default=20, help="Number of the exponentially spaced bins for the value categorical distribution prediction")
-
-  parser.add_argument("--actor_hidden_features", type=int, default=256, help="Size of the hidden layer the actor network.")
-  parser.add_argument("--actor_hidden_layers", type=int, default=1, help="Number of hidden layers for the actor network.")
-  parser.add_argument("--critic_hidden_features", type=int, default=256, help="Size of the hidden layer for the critic network.")
-  parser.add_argument("--critic_hidden_layers", type=int, default=1, help="Number of hidden layers for the critic network.")
 
 
 def add_wm_arguments(parser: ArgumentParser) ->ArgumentParser:
@@ -55,9 +40,10 @@ def add_wm_arguments(parser: ArgumentParser) ->ArgumentParser:
   parser.add_argument("--smoothing_window", type=int, default=32, help="How many returns to use for the running average window")
   parser.add_argument("--log_returns", action="store_true", help="A flag whether to log the smoothed returns. They will be stored in the same directory as the model.")
   ## Loss function coefficients
-  parser.add_argument("--beta_prediction", type=float, default=1, help="The beta coefficient for the prediction loss")
-  parser.add_argument("--beta_dynamics", type=float, default=1, help="The beta coefficient for the dynamics loss")
-  parser.add_argument("--beta_representation", type=float, default=0.1, help="The beta coefficient for the representation loss")
+  parser.add_argument("--beta_prediction", type=float, default=1, help="The beta coefficient for predictor loss")
+  parser.add_argument("--beta_dynamics", type=float, default=1, help="The beta coefficient for dynamics (pushing prior prediction towards posterior) loss")
+  parser.add_argument("--beta_representation", type=float, default=0.1, help="The beta coefficient for representation (pushing posterior representation toward prior) loss")
+  parser.add_argument("--beta_infoset", type=float, default=1.0, help="The beta coefficient for latent infoset learning loss")
   
   parser.add_argument("--free_bits_threshold", type=float, default=1, help="Clipping threshold for the dynamics and representation losses in free bits.")
   parser.add_argument("--uniform_mix", type=float, default=0.01, help="Amount of uniform mixed with the network returned categoricals.")
@@ -97,43 +83,20 @@ def add_rnad_arguments(parser: ArgumentParser) ->ArgumentParser:
   Also, for joint_train some training loop arguments like dreamer_path are not specified."""
   
   ##RNaD parameters  
-  parser.add_argument("--target_network_update", type=float, default=1e-3, help="EMA coefficient for the target network update.")
   parser.add_argument("--eta", type=float, default=0.2, help="Strenght of the regularization in RNaD. Used for the reward transformation and the KL regularization for V-trace.")
-  parser.add_argument("--vtrace_eta", type=float, default=0.2, help="Strenght of the additional KL regularization term in V-trace.")
-  parser.add_argument("--ac_bin_range", type=int, default=20, help="Number of the exponentially spaced bins for the value categorical distribution prediction")
-
-  #Dreamer model extraction parameters
-  parser.add_argument("--state_sample_threshold", type=float, default=0.05, help="Threshold for the stochastic state sampling. If the probability of a class is below this threshold, it is not sampled.")
-  parser.add_argument("--terminal_threshold", type=float, default=0.5, help="How much probability must the softmaxed logit have, to consider the state terminal.")
-  parser.add_argument("--legal_threshold", type=float, default=0.5, help="How much probability must the softmaxed logit have, to consider the action legal.")
-
-  #Loss coefficients
-  parser.add_argument("--beta_imagination", type=float, default=1.0, help="Coefficient for the loss on Dreamer imagined trajectories.")
-  parser.add_argument("--beta_real", type=float, default=0.3, help="Coefficient for the loss on trajectories sampled from the real environment.")
   ##Entropy schedule- network switching
   parser.add_argument("--entropy_schedule_size", default=(100, 1000), help="Defines how many iterations should be done for each item in the sequence.")
-  parser.add_argument("--entropy_schedule_repeats", default=(100,1), help="Defines amount of network switching sequences for each item in the sequence. Make sure last element is 1. For details see the EntropySchedule class.")
+  parser.add_argument("--entropy_schedule_repeats", default=(10,1), help="Defines amount of network switching sequences for each item in the sequence. Make sure last element is 1. For details see the EntropySchedule class.")
 
   ##V-Trace paraemters
-  parser.add_argument("--rho_vtrace", type=float, default=1.0, help="Rho clipping parameter for V-Trace")
-  parser.add_argument("--c_vtrace", type=float, default=1.0, help="C clipping parameter for V-Trace")
+  parser.add_argument("--rho_vtrace", type=float, default=-1.0, help="Rho clipping parameter for V-Trace. If < 0 treated as infinity (no clipping)")
+  parser.add_argument("--c_vtrace", type=float, default=-1.0, help="C clipping parameter for V-Trace. If < 0 treated as infinity (no clipping)")
   parser.add_argument("--gamma_vtrace", type=float, default=1.0, help="Discount factor for V-Trace")
   parser.add_argument("--lambda_vtrace", type=float, default=1.0, help="Lambda parameter for V-Trace")
-
-  #For the return normalization technique
-  parser.add_argument("--upper_percentile", type=float, default=95, help="Upper percentile for the return normalization range")
-  parser.add_argument("--lower_percentile", type=float, default=5, help="Lower percentile for the return normalization range")
-  parser.add_argument("--range_ema_coeff", type=float, default=0.99, help="Coefficient for the EMA update of return normalization range")
-  #For taking imagination starts
-  parser.add_argument("--num_last", type=int, default=-1, help="How many steps from the end of the trajectory to take as starting points for imagination. If <= 0, take the entire trajectory.")
 
   ##NeuRD parameters, currently not used, because currently the return normalization is used
   parser.add_argument("--neurd_clip", type=float, default=10000, help="Clip parameter for NeuRD")
   parser.add_argument("--neurd_threshold", type=float, default=2, help="Threshold parameter for NeuRD")
-
-  ##Network layer parameters
-  parser.add_argument("--rnad_hidden_features", type=int, default=256, help="Size of the hidden layer in the RNaD actor-critic network")
-  parser.add_argument("--rnad_hidden_layers", type=int, default=1, help="Number of stacked hidden layers in the RNaD actor-critic network")
 
   return parser
 
@@ -185,16 +148,35 @@ def prepare_experiment_parser():
   parser.add_argument("--img_sampling_epsilon", type=float, default=0.0, help="Defines mix of uniform policy to the network learned policy during imagination trajectory sampling.")
   parser.add_argument("--real_sampling_epsilon", type=float, default=0.0, help="Defines mix of uniform policy to the network learned policy during real trajectory sampling.")
 
+  # Actor-critic parameters shared both for Reinforce and RNaD
+  parser.add_argument("--num_last", type=int, default=-1, help="How many steps from the end of the trajectory to take as starting points for imagination. If <= 0, take the entire trajectory.")
+
+
+  parser.add_argument("--state_sample_threshold", type=float, default=0.05, help="Threshold when sampling states. Outcomes below this threshold are ignored.")
+  parser.add_argument("--terminal_threshold", type=float, default=0.5, help="Threshold when to consider the state terminal.")
+  parser.add_argument("--legal_threshold", type=float, default=0.5, help="Threshold for considering actions legal.")
+  parser.add_argument(f"--ac_bin_range", type=int, default=20, help="Number of the exponentially spaced bins for the value categorical distribution prediction")
+
+  parser.add_argument("--actor_hidden_features", type=int, default=256, help="Size of the hidden layer the actor network.")
+  parser.add_argument("--actor_hidden_layers", type=int, default=1, help="Number of hidden layers for the actor network.")
+  parser.add_argument("--critic_hidden_features", type=int, default=256, help="Size of the hidden layer for the critic network.")
+  parser.add_argument("--critic_hidden_layers", type=int, default=1, help="Number of hidden layers for the critic network.")
+
+  parser.add_argument(f"--target_network_update", type=float, default=1e-3, help="1 - EMA coefficient for target network update")
+
+
+  parser.add_argument(f"--beta_imagination", type=float, default=1.0, help="Coefficient for loss on Dreamer imagined trajectories")
+  parser.add_argument(f"--beta_real", type=float, default=0.3, help="Coefficient for loss on real environment trajectories")
+
   parser = add_optimizer_arguments(parser)
+  parser = add_wm_arguments(parser)
 
   subparsers = parser.add_subparsers(dest="train_mode", required=True, help="Which training mode to run. Either reinforce or rnad")
 
   joint_parser = subparsers.add_parser(name="reinforce", help="Train both world model and standard Dreamer Reinforce + TD-learning")
-  joint_parser = add_wm_arguments(joint_parser)
   joint_parser = add_actor_critic_arguments(joint_parser)
 
   joint_rnad_parser = subparsers.add_parser(name="rnad", help="Train both world model and RNaD as the actor-critic.")
-  joint_rnad_parser = add_wm_arguments(joint_rnad_parser)
   joint_rnad_parser = add_rnad_arguments(joint_rnad_parser)
 
   return parser

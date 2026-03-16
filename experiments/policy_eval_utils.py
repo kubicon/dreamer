@@ -36,7 +36,7 @@ def extract_model_policy(model: DreamerMA|None, game: JaxGame | DreamerModelGame
   if uniform or not model:
     vectorized_get_policy = jax.vmap(jax.vmap(uniform_policy, in_axes=(0, 0), out_axes=0), in_axes=(0, 0), out_axes=0)
   else:
-    vectorized_net = MARSSM.vmap_over_net(model.optimizer.model.policy_net(), in_axes=[(0, 0), (0, 0)], out_axes=[0, 0])
+    vectorized_net = MARSSM.vmap_over_net(model.optimizer.model.actor, in_axes=[(0, 0), (0, 0)], out_axes=[0, 0])
     vectorized_get_policy = lambda x, y : vectorized_net(x, y)[0]
   def _tree_walk(game_states: GameState, legals_non_padded: jax.Array, depth=0):
      # Denoting this as A(D)
@@ -279,7 +279,7 @@ def model_best_response(model: DreamerMA, game: JaxGame | DreamerModelGame, cust
   if checking_model:
     ma_rssm = model.optimizer.model
     #vmap over the H(D) dimension first and then over the player dimension
-    vectorized_get_policy = MARSSM.vmap_over_net(ma_rssm.policy_net(), in_axes=[(0, 0), (0, 0)], out_axes=[0, 0])
+    vectorized_get_policy = MARSSM.vmap_over_net(ma_rssm.actor, in_axes=[(0, 0), (0, 0)], out_axes=[0, 0])
     
 
   else:

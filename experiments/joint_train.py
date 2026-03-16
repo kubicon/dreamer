@@ -29,6 +29,7 @@ def train(args, game: JaxGame):
       beta_prediction = args.beta_prediction,
       beta_dynamics = args.beta_dynamics,
       beta_representation = args.beta_representation,
+      beta_infoset = args.beta_infoset,
       
       free_bits_clip_threshold = args.free_bits_threshold,
       uniform_mix = args.uniform_mix,
@@ -77,12 +78,8 @@ def train(args, game: JaxGame):
         beta_real = args.beta_real,
 
         eta=args.eta,
-        vtrace_eta = args.vtrace_eta,
         sampling_epsilon=args.img_sampling_epsilon,
-        
-        upper_percentile = args.upper_percentile,
-        lower_percentile = args.lower_percentile,
-        range_ema_coeff = args.range_ema_coeff,
+
         num_last = args.num_last,
 
         #World model extraction parameters
@@ -95,8 +92,8 @@ def train(args, game: JaxGame):
         entropy_schedule_repeats = args.entropy_schedule_repeats,
         
         #V-Trace parameters
-        rho_vtrace = args.rho_vtrace,
-        c_vtrace = args.c_vtrace,
+        rho_vtrace = args.rho_vtrace if args.rho_vtrace >= 0 else jnp.inf,
+        c_vtrace = args.c_vtrace if args.c_vtrace >= 0 else jnp.inf,
         gamma_vtrace = args.gamma_vtrace,
         lambda_vtrace = args.lambda_vtrace,
 
@@ -104,8 +101,9 @@ def train(args, game: JaxGame):
         neurd_clip = args.neurd_clip,
         neurd_threshold = args.neurd_threshold,
 
-        #Network parameters
-        rnad_network_details = (args.rnad_hidden_features, args.rnad_hidden_layers),
+        # Ordered as (hidden_layer_features, num_hidden_layers)
+        actor_network_details = (args.actor_hidden_features, args.actor_hidden_layers),
+        critic_network_details = (args.critic_hidden_features, args.critic_hidden_layers),
         
         target_network_update = args.target_network_update
     )
@@ -129,7 +127,8 @@ def train(args, game: JaxGame):
       num_last = args.num_last,
 
       sampling_epsilon=args.img_sampling_epsilon,
-      #Dreamer extraction parameters
+
+      #World model extraction parameters
       state_sample_threshold=args.state_sample_threshold,
       terminal_threshold = args.terminal_threshold,
       legal_threshold = args.legal_threshold,

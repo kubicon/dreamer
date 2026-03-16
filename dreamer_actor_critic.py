@@ -123,19 +123,7 @@ class DreamerActorCritic():
       self.metrics_keys.append('real_policy')
     self.metrics = {k: 0 for k in self.metrics_keys}
     self.grad_norms = {'img': {}, 'real': {}}
-    self.network_keys = (ma_rssm.network_names[-2], )
-  
-    
-  
-  
-   
-  @partial(nnx.jit, static_argnums=(0,))
-  def _jit_get_actor(self, actor_network: ActorNetwork, input, legal) -> chex.Array:
-    return actor_network(input, legal)
-  
-  @partial(nnx.jit, static_argnums=(0,))
-  def _jit_get_critic(self, critic_network: CriticNetwork, input) ->chex.Array:
-    return critic_network(input)
+    self.network_keys = (*ma_rssm.network_names[-2:], )
   
   
 
@@ -164,16 +152,17 @@ class DreamerActorCritic():
       
       bins = jnp.arange((2 * self.config.bin_range) + 1) - self.config.bin_range
       # Per player vmap
-      per_player_actor_apply = nnx.vmap(self._jit_get_actor, in_axes=(None, 0, 0), out_axes=(0))
-      per_player_critic_apply = nnx.vmap(self._jit_get_critic, in_axes=(None, 0), out_axes=(0))
+      per_player_net_apply = nnx.vmap(MARSSM.call_net, in_axes=(None, 0, 0), out_axes=(0))
       #Per trajectory and batch dimensions
-      vectorized_actor_apply = nnx.vmap(nnx.vmap(per_player_actor_apply, in_axes=(None, 0, 0), out_axes=(0)), in_axes=(None, 0, 0), out_axes=(0))
-      vectorized_critic_apply = nnx.vmap(nnx.vmap(per_player_critic_apply, in_axes=(None, 0), out_axes=(0)), in_axes=(None, 0), out_axes=(0))
-      pi, log_pi, logit = vectorized_actor_apply(actor_network, timestep.obs, timestep.legal)
+      vectorized_net_apply = nnx.vmap(nnx.vmap(per_player_net_apply, in_axes=(None, 0, 0), out_axes=(0)), in_axes=(None, 0, 0), out_axes=(0))
+      vectorized_critic_apply = nnx.vmap(nnx.vmap(MARSSM.call_net, in_axes=(None, 0), out_axes=(0)), in_axes=(None, 0), out_axes=(0))
+      pi, log_pi, logit = vectorized_net_apply(actor_network, timestep.obs, timestep.legal)
 
-      v_dist_logits = vectorized_critic_apply(critic_network, timestep.obs)
+      joint_obs = jnp.reshape(timestep.obs, (*timestep.obs.shape[:-2], -1))
 
-      v_target_dist_logits = vectorized_critic_apply(target_network, timestep.obs)
+      v_dist_logits = vectorized_critic_apply(critic_network, joint_obs)
+
+      v_target_dist_logits = vectorized_critic_apply(target_network, joint_obs)
        
       v_target = get_value_from_bins(v_target_dist_logits, self.config.bin_range)
       
@@ -206,7 +195,7 @@ class DreamerActorCritic():
       return v_loss_value + reinforce_loss_value, new_range, v_loss_value, reinforce_loss_value
 
     def imagination_loss(model: MARSSM,
-      target_network: RNaDNetwork,
+      target_network: ActorNetwork,
       trajectory_key: chex.Array,
       starting_points: PredictionStepWithLegal,
       return_range: chex.Array,
@@ -219,7 +208,7 @@ class DreamerActorCritic():
         return beta_imagination * loss_val, (new_range, metrics)
     
     def real_loss(model: MARSSM,
-      target_network: RNaDNetwork,
+      target_network: ActorNetwork,
       timestep: ActorCriticTimeStep,
       return_range: chex.Array,
       beta_real: float):
