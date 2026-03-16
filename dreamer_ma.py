@@ -81,13 +81,11 @@ class DreamerMA():
     #Also cache the sampling for the buffer
     self.buffer.cache_sampling(ma_rssm.seq, ma_rssm.enc, ma_rssm.observer, ma_rssm.infoset_network, ma_rssm.actor)
     self.grad_norms = {k: 0 for k in self.network_keys} 
-    self.metrics = {'dec': 0, 'con': 0, 'leg': 0,  'rew': 0, 'dyn': 0, 'rep': 0}
+    self.metrics = {'dec': 0, 'con': 0, 'leg': 0,  'rew': 0, 'dyn': 0, 'rep': 0, 'is_act_dec': 0, 'is_pred': 0}
     if self.use_real_infoset:
       assert self.game.information_state_tensor_shape() == self.game.observation_tensor_shape(), "Specification of use_real_infoset is only sound when the environment provides infoset in place of observation!"
       print(f"Using original game infosets of shape {self.infoset_size}")
     else:
-      #Add the infoset losses, if we should compute them
-      self.metrics.update({'is_obs_dec' : 0, 'is_act_dec': 0, 'is_pred': 0})
       print(f"Using latent infosets of shape {self.infoset_size}")
     
   
@@ -128,15 +126,10 @@ class DreamerMA():
         legal = model.leg(recurrent_state, deterministic_state)
         #Dont use symexp here during training. Otherwise we would be training
         # the symexp outputs to match the symlog inputs.
-        decoded_obs = model.get_decoder_no_jit(recurrent_state, deterministic_state, use_symexp=False)
         new_recurrent = model.get_next_recurrent_no_jit(recurrent_state, deterministic_state, action)
-        if not ma_rssm.use_real_infoset:
-          new_latent_infosets = model.get_next_infoset_all_no_jit(prev_latent_infoset, obs, prev_action)
-          infoset_decoded_obs, infoset_decoded_actions = model.get_infoset_decoder_all_no_jit(new_latent_infosets)
-          infoset_predicted_recurrent, infoset_predicted_deter = model.infoset_predictor(new_latent_infosets)
-        else:
-          new_latent_infosets = prev_latent_infoset
-          infoset_decoded_obs, infoset_decoded_actions, infoset_predicted_recurrent, infoset_predicted_deter = 0, 0, 0, 0
+        new_latent_infosets = model.get_next_infoset_all_no_jit(prev_latent_infoset, obs, prev_action)
+        decoded_obs, infoset_decoded_actions = model.get_infoset_decoder_all_no_jit(new_latent_infosets)
+        infoset_predicted_recurrent, infoset_predicted_deter = model.infoset_predictor(new_latent_infosets)
         preds = PredictionStepWithLegal(
                                 recurrent_state = recurrent_state,
                                 repr_state = stochastic_state,
@@ -147,7 +140,6 @@ class DreamerMA():
                                 legal_logit = legal,
                                 dynamics_state = prior_stochastic_state,
                                 joint_latent_infoset = new_latent_infosets,
-                                infoset_decoded_obs = infoset_decoded_obs,
                                 infoset_decoded_actions = infoset_decoded_actions,
                                 infoset_predicted_recurrent = infoset_predicted_recurrent,
                                 infoset_predicted_deter = infoset_predicted_deter) 
@@ -211,12 +203,12 @@ class DreamerMA():
       action_loss_mask = is_first[..., None] * previous_valid * previous_non_terminal
       #These are one-hot encoded. We want to maximize the probability
       # of seeing the previous action, hence making sure the infoset retains information about it
-      infoset_prev_action_loss = -get_categorical_prob(predictions.infoset_decoded_actions, previous_actions)
+      infoset_prev_action_loss = -get_categorical_log_prob(predictions.infoset_decoded_actions, previous_actions)
       is_act = get_loss_mean_with_mask(infoset_prev_action_loss, action_loss_mask[..., None, None])
       l_infoset += is_act
       #Current observation loss, similar intuition as with the previous action
       #Reduces to MSE
-      is_obs_loss = -get_normal_log_prob(predictions.infoset_decoded_obs, timestep.obs, use_symlog=True)
+      is_obs_loss = -get_normal_log_prob(predictions.decoded_obs, timestep.obs, use_symlog=True)
       is_obs = get_loss_mean_with_mask(is_obs_loss, timestep.valid[..., None, None])
       l_infoset += is_obs
       # The current recurrent state prediction loss. This together
@@ -226,7 +218,7 @@ class DreamerMA():
       is_rec_loss = -get_normal_log_prob(predictions.infoset_predicted_recurrent, jax.lax.stop_gradient(predictions.recurrent_state), use_symlog=True)
       is_rec = get_loss_mean_with_mask(is_rec_loss, timestep.valid[..., None])
       l_infoset += is_rec
-      is_deter_loss = -get_categorical_prob(predictions.infoset_predicted_deter, jax.lax.stop_gradient(predictions.deter_state))
+      is_deter_loss = -get_categorical_log_prob(predictions.infoset_predicted_deter, jax.lax.stop_gradient(predictions.deter_state))
       is_deter = get_loss_mean_with_mask(is_deter_loss, timestep.valid[..., None, None])
       l_infoset += is_deter
       losses.extend([is_act, is_obs, is_rec, is_deter])

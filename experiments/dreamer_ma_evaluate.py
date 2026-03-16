@@ -1,6 +1,5 @@
 from argparse import ArgumentParser
 import os
-import sys
 import numpy as np
 import jax
 import flax.nnx as nnx
@@ -9,7 +8,8 @@ import time
 import matplotlib.pyplot as plt
 
 from dreamer_ma import DreamerMA
-from train_utils import load_model
+from ma_rssm import MARSSM
+from train_utils import load_model, RNaDConfig
 
 from experiments.tree_view_utils import *
 from experiments.eval_utils import *
@@ -32,6 +32,7 @@ class WalkCarry:
   recurrent_state: chex.Array
   stoch_state:chex.Array
   deter_state: chex.Array
+  joint_latent_infoset: chex.Array
   reward: chex.Array
   terminal: chex.Array
   after_chance: chex.Array
@@ -43,7 +44,7 @@ def check_state_one_outcome(model: DreamerMA, carry:WalkCarry, eps:float, verbos
   mistake_probs = np.zeros(5)
   differences = np.zeros(5)
   ma_rssm = model.optimizer.model
-  decoded_obs = ma_rssm.get_decoder_no_jit(carry.recurrent_state, carry.deter_state)
+  decoded_obs = ma_rssm.get_decoder_no_jit(carry.joint_latent_infoset)
   p1_decoded_obs, p2_decoded_obs = decoded_obs[0], decoded_obs[1]
   pred_reward, pred_terminal, pred_legal = ma_rssm.get_predictor(carry.recurrent_state, carry.deter_state)
   p1_obs_max_difference = jnp.max(jnp.abs(carry.obs[0] - p1_decoded_obs))
@@ -202,7 +203,8 @@ def model_walk_test(model:DreamerMA,
       #print(f"Next deters: {next_deters}")
       for i in range(next_terminals.shape[0]):
         outcome_parent = action_parent
-        next_terminal = next_terminals[i]
+        next_terminal = next_terminals[i] 
+        next_joint_infoset = ma_rssm.get_next_infoset_all(carry.joint_latent_infoset, next_obs[i], ai_oh)
         next_reward = next_rewards[i]
         next_legal = next_legals[i]
         next_state = jax.tree.map(lambda x: x[i], next_states)
@@ -222,6 +224,7 @@ def model_walk_test(model:DreamerMA,
                                 recurrent_state= next_recurrent,
                                 stoch_state=next_stoch_state,
                                 deter_state=deter,
+                                joint_latent_infoset=next_joint_infoset,
                                 reward=next_reward,
                                 terminal=next_terminal,
                                 after_chance=is_chance)
@@ -235,6 +238,9 @@ def model_walk_test(model:DreamerMA,
   init_state, init_legals = model.game.initialize_structures()
   init_recurrent = ma_rssm.get_init_recurrent()
   init_chance =  model.game.is_chance(init_state)
+  per_player_init_infoset = MARSSM.vmap_over_net(ma_rssm.infoset_network, in_axes=[(None, 0, None)], out_axes=[(0)])
+  dummy_infoset = jnp.zeros((ma_rssm.infoset_size))
+  dummy_action = jnp.zeros((model.action_dimension))
   if init_chance:
     chance_outcomes = model.game.depth_chance_valid_outcomes(0)
     next_states, next_terminals, next_rewards, next_legals, next_probs = unroll_chance_node(model.game, init_state, chance_outcomes)
@@ -255,11 +261,11 @@ def model_walk_test(model:DreamerMA,
       # beloning to the outcome.
       # The first prediction is posterior, so each outcome has its own stochastic state
       # because they are differentiated by the observations.
-      init_obs = get_obs_fn(next_state)[None, ...]
+      init_obs = get_obs_fn(next_state)
       #print(f"Init obs for outcome {i}, is {init_obs}")
       # if verbose:
       #   print(f"Checking state {next_state}")
-      init_stoch_state = get_stoch_from_prediction(ma_rssm.get_encoder(init_recurrent, init_obs[0]))
+      init_stoch_state = get_stoch_from_prediction(ma_rssm.get_encoder(init_recurrent, init_obs))
       init_deters, init_probs = get_next_outcomes(model, init_stoch_state, init_recurrent, init_obs, probability_eps)
       init_deters = init_deters[0]
       init_probs = init_probs[0]
@@ -273,11 +279,12 @@ def model_walk_test(model:DreamerMA,
       #num_init_deters = len(init_deters)
       for j, deter in enumerate(init_deters):
         init_carry = WalkCarry(legals= next_legal,
-                              obs = init_obs[0],
+                              obs = init_obs,
                               game_state = next_state,
                               recurrent_state= init_recurrent,
                               stoch_state=init_stoch_state,
                               deter_state=deter,
+                              joint_latent_infoset= per_player_init_infoset(dummy_infoset, init_obs, dummy_action),
                               reward=next_reward,
                               terminal=next_terminal,
                               after_chance=init_chance)
@@ -308,6 +315,7 @@ def model_walk_test(model:DreamerMA,
                               recurrent_state= init_recurrent,
                               stoch_state=init_stoch_state,
                               deter_state=deter,
+                              joint_latent_infoset=per_player_init_infoset(dummy_infoset, init_obs, dummy_action),
                               reward=jnp.array(0),
                               terminal=jnp.array(False),
                               after_chance=jnp.array(False))
@@ -357,7 +365,7 @@ def main():
     if first:
       model = load_model(model_path)
       assert isinstance(model, DreamerMA), f"The saved model should be an instance of DreamerMA, instead got {model.__class__}"
-      if model.use_rnad:
+      if isinstance(model.ac_config, RNaDConfig):
         plot_subdir_str = "rnad"
       first=False
     else:
