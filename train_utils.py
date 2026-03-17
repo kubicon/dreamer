@@ -21,6 +21,7 @@ class PredictionStepWithLegal():
   dynamics_state: chex.Array
   #Latent infoset predictions and decoding
   joint_latent_infoset: chex.Array
+  infoset_decoded_obs: chex.Array
   infoset_decoded_actions: chex.Array
   infoset_predicted_recurrent: chex.Array
   infoset_predicted_deter: chex.Array

@@ -8,7 +8,7 @@ import time
 import matplotlib.pyplot as plt
 
 from dreamer_ma import DreamerMA
-from ma_rssm import MARSSM
+from ma_rssm import MARSSM, symlog
 from train_utils import load_model, RNaDConfig
 
 from experiments.tree_view_utils import *
@@ -44,7 +44,7 @@ def check_state_one_outcome(model: DreamerMA, carry:WalkCarry, eps:float, verbos
   mistake_probs = np.zeros(5)
   differences = np.zeros(5)
   ma_rssm = model.optimizer.model
-  decoded_obs = ma_rssm.get_decoder_no_jit(carry.joint_latent_infoset)
+  decoded_obs = ma_rssm.get_decoder_no_jit(carry.recurrent_state, carry.deter_state)
   p1_decoded_obs, p2_decoded_obs = decoded_obs[0], decoded_obs[1]
   pred_reward, pred_terminal, pred_legal = ma_rssm.get_predictor(carry.recurrent_state, carry.deter_state)
   p1_obs_max_difference = jnp.max(jnp.abs(carry.obs[0] - p1_decoded_obs))
@@ -158,8 +158,8 @@ def model_walk_test(model:DreamerMA,
     mistake_probs  = mistake_probs + (state_mistake_probs * reach_probability)
     if carry.terminal:
       return
-    policy_obs = carry.obs if use_real_infoset else ma_rssm.get_infoset(carry.recurrent_state, carry.deter_state)
-    pi = np.asarray(ma_rssm.get_policy_both(policy_obs, carry.legals))
+    policy_obs = symlog(carry.obs) if use_real_infoset else ma_rssm.get_infoset(carry.recurrent_state, carry.deter_state, carry.joint_latent_infoset)
+    pi = np.asarray(ma_rssm.get_policy_both(policy_obs, carry.legals, use_symlog=False))
     if verbose:
       print(f"Checking state {carry.game_state}")
       print(f"Reach probs {reach_probability}")

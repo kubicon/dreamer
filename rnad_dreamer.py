@@ -349,23 +349,26 @@ class RNaDDreamer():
       alpha: float,
       compute_actor_loss=True
     ):
-      
+      #If the timestep contains real environment infosets,
+      # transform them with symlog first
+      obs = symlog(timestep.obs) if self.use_real_infoset else timestep.obs
       bins = jnp.arange((2 * self.config.bin_range) + 1) - self.config.bin_range
       # Per player vmap
       per_player_net_apply = nnx.vmap(MARSSM.call_net, in_axes=(None, 0, 0), out_axes=(0))
       #Per trajectory and batch dimensions
       vectorized_net_apply = nnx.vmap(nnx.vmap(per_player_net_apply, in_axes=(None, 0, 0), out_axes=(0)), in_axes=(None, 0, 0), out_axes=(0))
+      #Critic is centralized
       vectorized_critic_apply = nnx.vmap(nnx.vmap(MARSSM.call_net, in_axes=(None, 0), out_axes=(0)), in_axes=(None, 0), out_axes=(0))
     
-      pi, log_pi, logit = vectorized_net_apply(rnad_network, timestep.obs, timestep.legal)
+      pi, log_pi, logit = vectorized_net_apply(rnad_network, obs, timestep.legal)
 
-      joint_obs = jnp.reshape(timestep.obs, (*timestep.obs.shape[:-2], -1))
+      joint_obs = jnp.reshape(obs, (*obs.shape[:-2], -1))
 
       v_dist_logits = vectorized_critic_apply(critic_network, joint_obs)
 
       v_target_dist_logits = vectorized_critic_apply(target_network, joint_obs)
-      _, log_pi_prev, _ = vectorized_net_apply(prev_network, timestep.obs, timestep.legal)
-      _, log_pi_prev_, _ = vectorized_net_apply(_prev_network, timestep.obs, timestep.legal)
+      _, log_pi_prev, _ = vectorized_net_apply(prev_network, obs, timestep.legal)
+      _, log_pi_prev_, _ = vectorized_net_apply(_prev_network, obs, timestep.legal)
        
       v_target = get_value_from_bins(v_target_dist_logits, self.config.bin_range)
       # This creates the regularization term for rewards
@@ -476,7 +479,8 @@ class RNaDDreamer():
     rnad_timestep = wm_timestep_to_timestep(wm_timestep, wm_prediction_step, self.use_real_infoset)   
     #TODO: This will be called again in the real loss. Cannot get rid of the
     # redundant call somehow?
-    timestep_pi, _, _ = vectorized_net_apply(optimizer.model.actor, rnad_timestep.obs, rnad_timestep.legal)
+    obs = symlog(rnad_timestep.obs) if self.use_real_infoset else rnad_timestep.obs
+    timestep_pi, _, _ = vectorized_net_apply(optimizer.model.actor, obs, rnad_timestep.legal)
     starting_points, start_reaches_is = vectorized_starting_point(jax.lax.stop_gradient(timestep_pi), 
                                                                   rnad_timestep, jax.tree.map(lambda x: x[:-1], wm_prediction_step))
     

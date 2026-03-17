@@ -149,16 +149,17 @@ class DreamerActorCritic():
       return_range: chex.Array,
       compute_actor_loss = True
     ):
-      
+      obs = symlog(timestep.obs) if self.use_real_infoset else timestep.obs
       bins = jnp.arange((2 * self.config.bin_range) + 1) - self.config.bin_range
       # Per player vmap
       per_player_net_apply = nnx.vmap(MARSSM.call_net, in_axes=(None, 0, 0), out_axes=(0))
       #Per trajectory and batch dimensions
       vectorized_net_apply = nnx.vmap(nnx.vmap(per_player_net_apply, in_axes=(None, 0, 0), out_axes=(0)), in_axes=(None, 0, 0), out_axes=(0))
+      #The critic is centralized
       vectorized_critic_apply = nnx.vmap(nnx.vmap(MARSSM.call_net, in_axes=(None, 0), out_axes=(0)), in_axes=(None, 0), out_axes=(0))
-      pi, log_pi, logit = vectorized_net_apply(actor_network, timestep.obs, timestep.legal)
+      pi, log_pi, logit = vectorized_net_apply(actor_network, obs, timestep.legal)
 
-      joint_obs = jnp.reshape(timestep.obs, (*timestep.obs.shape[:-2], -1))
+      joint_obs = jnp.reshape(obs, (*obs.shape[:-2], -1))
 
       v_dist_logits = vectorized_critic_apply(critic_network, joint_obs)
 

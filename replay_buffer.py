@@ -12,7 +12,7 @@ from distributions import sample_categorical
 from ma_rssm import MARSSM
 from networks import *
 from games.jax_game import JaxGame, GameState
-from train_utils import TimeStep, BufferConfig, DreamerMAConfig, tree_where
+from train_utils import TimeStep, BufferConfig, DreamerMAConfig, tree_where, symlog
 
 u8 = jnp.uint8
 nu8 = np.uint8
@@ -86,7 +86,7 @@ class ReplayBuffer():
     # is stored.
     self.non_chance_trajectory_max = self.game.max_trajectory_lenght_no_chance()
 
-    self.use_infoset = self.wm_config.use_original_infoset
+    self.use_real_infoset = self.wm_config.use_original_infoset
     self._get_example_timestep()
 
     self.total_minibatch_size = self.wm_config.batch_size * self.non_chance_trajectory_max
@@ -402,13 +402,11 @@ class ReplayBuffer():
       tokens = encoder_network(obs)
       encoded_stoch = observer_network(carry.recurrent_state, tokens)
       encoded_deter = sample_categorical(encoded_stoch, deter_sample_key, self.stoch_state_sample_threshold)
-      obs_for_actor = obs
       joint_latent_infoset = carry.joint_latent_infoset
-      if not self.use_infoset:
-        joint_latent_infoset = vectorized_next_infoset(infoset_network, carry.joint_latent_infoset, obs, carry.prev_action)
-        obs_for_actor = joint_latent_infoset
+      joint_latent_infoset = vectorized_next_infoset(infoset_network, carry.joint_latent_infoset, obs, carry.prev_action)
+      obs_for_actor = symlog(obs) if self.use_real_infoset else joint_latent_infoset
         
-      pi = vectorized_get_actor(actor_network, obs_for_actor, carry.legal_actions)
+      pi = jax.lax.stop_gradient(vectorized_get_actor(actor_network, obs_for_actor, carry.legal_actions))
       #uniform mix to the policy
       normalization = jnp.sum(carry.legal_actions, axis=-1, keepdims=True)
       uniform_pi = carry.legal_actions / (normalization + (normalization == 0))

@@ -80,8 +80,8 @@ class DreamerMA():
     #self.wm_cached_train = nnx.cached_partial(self.update_world_model, self.optimizer)
     #Also cache the sampling for the buffer
     self.buffer.cache_sampling(ma_rssm.seq, ma_rssm.enc, ma_rssm.observer, ma_rssm.infoset_network, ma_rssm.actor)
-    self.grad_norms = {k: 0 for k in self.network_keys} 
-    self.metrics = {'dec': 0, 'con': 0, 'leg': 0,  'rew': 0, 'dyn': 0, 'rep': 0, 'is_act_dec': 0, 'is_pred': 0}
+    self.grad_norms = {k: 0 for k in self.network_keys}
+    self.metrics = {'dec': 0, 'con': 0, 'leg': 0,  'rew': 0, 'dyn': 0, 'rep': 0,'is_act_dec': 0, 'is_obs_dec': 0, 'is_rec_pred': 0, 'is_deter_pred': 0}
     if self.use_real_infoset:
       assert self.game.information_state_tensor_shape() == self.game.observation_tensor_shape(), "Specification of use_real_infoset is only sound when the environment provides infoset in place of observation!"
       print(f"Using original game infosets of shape {self.infoset_size}")
@@ -122,13 +122,14 @@ class DreamerMA():
         deterministic_state = sample_categorical(stochastic_state, cur_key)
         prior_stochastic_state = model.get_dynamics_no_jit(recurrent_state)
         prior_stochastic_state = add_uniform_mix(prior_stochastic_state, self.wm_config.uniform_mix)
+        decoded_obs = model.get_decoder_no_jit(recurrent_state, deterministic_state, use_symexp=False)
         reward, done = model.rew(recurrent_state, deterministic_state), model.term(recurrent_state, deterministic_state)
         legal = model.leg(recurrent_state, deterministic_state)
         #Dont use symexp here during training. Otherwise we would be training
         # the symexp outputs to match the symlog inputs.
         new_recurrent = model.get_next_recurrent_no_jit(recurrent_state, deterministic_state, action)
         new_latent_infosets = model.get_next_infoset_all_no_jit(prev_latent_infoset, obs, prev_action)
-        decoded_obs, infoset_decoded_actions = model.get_infoset_decoder_all_no_jit(new_latent_infosets)
+        infoset_decoded_obs, infoset_decoded_actions = model.get_infoset_decoder_all_no_jit(new_latent_infosets)
         infoset_predicted_recurrent, infoset_predicted_deter = model.infoset_predictor(new_latent_infosets)
         preds = PredictionStepWithLegal(
                                 recurrent_state = recurrent_state,
@@ -141,6 +142,7 @@ class DreamerMA():
                                 dynamics_state = prior_stochastic_state,
                                 joint_latent_infoset = new_latent_infosets,
                                 infoset_decoded_actions = infoset_decoded_actions,
+                                infoset_decoded_obs = infoset_decoded_obs,
                                 infoset_predicted_recurrent = infoset_predicted_recurrent,
                                 infoset_predicted_deter = infoset_predicted_deter) 
         
@@ -191,8 +193,7 @@ class DreamerMA():
       repr_loss = kl_divergence(posterior, jax.lax.stop_gradient(prior))
       l_rep += jnp.maximum(self.wm_config.free_bits_clip_threshold, get_loss_mean_with_mask(repr_loss, timestep.valid))
       
-      losses = [dec, con, leg, rew, l_dyn, l_rep]
-      mults = [*(self.wm_config.beta_prediction, ) * 4, self.wm_config.beta_dynamics, self.wm_config.beta_representation]
+      mults = [*(self.wm_config.beta_prediction, ) * 4, self.wm_config.beta_dynamics, self.wm_config.beta_representation, *(self.wm_config.beta_infoset, ) * 4]
       l_infoset = 0
       #Update the latent infosets
       #The action loss predicts the previous action. Which also means we do not
@@ -200,15 +201,16 @@ class DreamerMA():
       previous_valid = jnp.roll(timestep.valid, 1, axis=0)
       previous_non_terminal = ~jnp.roll(timestep.terminal, 1, axis=0)
       is_first = jnp.arange(timestep.action.shape[0]) == 0
-      action_loss_mask = is_first[..., None] * previous_valid * previous_non_terminal
+      action_loss_mask = (~is_first[..., None]) * previous_valid * previous_non_terminal
       #These are one-hot encoded. We want to maximize the probability
       # of seeing the previous action, hence making sure the infoset retains information about it
       infoset_prev_action_loss = -get_categorical_log_prob(predictions.infoset_decoded_actions, previous_actions)
       is_act = get_loss_mean_with_mask(infoset_prev_action_loss, action_loss_mask[..., None, None])
+      #is_act = 0
       l_infoset += is_act
       #Current observation loss, similar intuition as with the previous action
       #Reduces to MSE
-      is_obs_loss = -get_normal_log_prob(predictions.decoded_obs, timestep.obs, use_symlog=True)
+      is_obs_loss = -get_normal_log_prob(predictions.infoset_decoded_obs, timestep.obs, use_symlog=True)
       is_obs = get_loss_mean_with_mask(is_obs_loss, timestep.valid[..., None, None])
       l_infoset += is_obs
       # The current recurrent state prediction loss. This together
@@ -217,17 +219,22 @@ class DreamerMA():
       # is enough to get the perfect information state.
       is_rec_loss = -get_normal_log_prob(predictions.infoset_predicted_recurrent, jax.lax.stop_gradient(predictions.recurrent_state), use_symlog=True)
       is_rec = get_loss_mean_with_mask(is_rec_loss, timestep.valid[..., None])
+      #is_rec = 0
       l_infoset += is_rec
       is_deter_loss = -get_categorical_log_prob(predictions.infoset_predicted_deter, jax.lax.stop_gradient(predictions.deter_state))
       is_deter = get_loss_mean_with_mask(is_deter_loss, timestep.valid[..., None, None])
+      #is_deter = 0
       l_infoset += is_deter
-      losses.extend([is_act, is_obs, is_rec, is_deter])
-      mults.extend([*(self.wm_config.beta_infoset, ) * 4])
+
+      
+      losses = [dec, con, leg, rew, l_dyn, l_rep, is_act, is_obs, is_rec, is_deter]
 
       wm_keys = self.metrics.keys()
       metrics = {k: v * m for k, v, m in zip(wm_keys, losses, mults)}
       
-      return self.wm_config.beta_prediction * l_pred + self.wm_config.beta_dynamics * l_dyn + self.wm_config.beta_representation * l_rep, (predictions, metrics)
+      compound_loss = sum(l * m for l, m in zip(losses, mults))
+
+      return compound_loss, (predictions, metrics)
   
     grad_norms = self.grad_norms.copy()
     func_data, grad = nnx.value_and_grad(world_model_loss, has_aux=True, argnums=(0))(
